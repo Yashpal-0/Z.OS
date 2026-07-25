@@ -23,9 +23,8 @@ notification) or when it needs permission.
   does not implement), `rofi` (X11-only). Therefore the input surface is `zenity --entry`.
 - `xdotool` is installed but only works on XWayland apps — do not rely on it for
   native GTK window control. Real GNOME window control is a separate subproject (out of scope).
-- Python is 3.14.4 (both system and brew). **Flagged risk:** very new for the Agent
-  SDK's anyio stack. First implementation step is a smoke test; if it breaks, pin a
-  3.12 via `uv` for the daemon only. Not a design change.
+- Python is 3.14.4. **Risk closed 2026-07-25:** `claude-agent-sdk` imports and runs
+  clean on 3.14.4. No `uv`-pinned 3.12 needed. Daemon runs on `.venv/bin/python`.
 
 ## Architecture
 
@@ -72,15 +71,54 @@ which the daemon matches *before* the agent sees the text.
 
 ## Permission model
 
-The Agent SDK's `can_use_tool` callback is the entire gate — the only path to any tool,
-so nothing routes around it.
+**The gate is a `PreToolUse` hook**, not the `can_use_tool` callback.
+
+This was the design's original claim and it was wrong. `can_use_tool` is the *last* step
+of a six-step evaluation flow, so five earlier steps can approve a call before the
+callback is ever consulted. Probed on 2026-07-25: `Bash` ran `echo hi` with
+`allowed_tools=[]` and `permission_mode="default"` while the callback never fired.
+The SDK documents the correct mechanism:
+
+> Run hooks first. A hook can deny the call outright or pass it on.
+>
+> For checks that must run on every tool call, use a `PreToolUse` hook: hooks run
+> before every other step, and a hook deny applies even in `bypassPermissions` mode.
+
+Three consequences, all load-bearing:
+
+- **`allowed_tools` stays empty, permanently.** It is not a convenience list — a bare
+  entry auto-approves that tool *before* the gate. The SDK raises
+  `CanUseToolShadowedWarning` when it detects this. Unlisted tools remain fully
+  available to the agent, so an empty list costs nothing.
+- **`setting_sources=[]`.** Otherwise `zosd` inherits allow-rules from
+  `~/.claude/settings.json` and any project `.claude/settings.json` — holes in the gate
+  that live outside this repo and change without notice.
+- **`can_use_tool` is kept as a second layer.** It verifiably fires for the
+  `mcp__zos__*` tools. Defence in depth: if hook dispatch ever changes, the custom
+  tools stay covered.
+
+Full evaluation order, from the SDK docs — the gate must sit at step 1:
+
+```
+1. hooks          <- Z.OS gate lives here; a deny here always wins
+2. deny rules     (disallowed_tools, settings.json)
+3. ask rules      (settings.json)
+4. permission mode
+5. allow rules    (allowed_tools, settings.json)  <- the hole we keep empty
+6. can_use_tool   <- Z.OS second layer, MCP tools only in practice
+```
 
 ### Tool classes
 
 | Class | Tools | Guarded-mode behavior |
 |---|---|---|
-| Safe | `Read`, `Grep`, `Glob`, `WebSearch`, `job_list`, `notify` | auto-allow |
-| Guarded | `Bash`, `Write`, `Edit`, `job_start`, `job_kill`, `app_launch` | prompt (see below) |
+| Safe | `Read`, `Grep`, `Glob`, `WebSearch`, `mcp__zos__job_list`, `mcp__zos__notify` | auto-allow |
+| Guarded | everything else — `Bash`, `Write`, `Edit`, `mcp__zos__job_start`, `mcp__zos__job_kill` | prompt (see below) |
+
+Custom tools are namespaced `mcp__zos__<name>` by `create_sdk_mcp_server`; built-ins stay
+bare. The gate matches a mixed namespace. Guarded is the **default**, not a list: the
+Safe set is enumerated and anything unrecognised — including a tool added by a future SDK
+version — prompts. A guarded-list would fail open on the one name nobody predicted.
 
 There is **no hard never-list** — per user decision, everything dangerous (including
 `sudo`, `rm -rf`, `dd`) is guarded and can be allowed through in auto mode.
@@ -183,7 +221,7 @@ wrapping a one-line shell command in a tool definition is pure overhead.
 
 ```
 zosd.py       daemon: socket loop, agent session, permission gate, mode matcher
-tools.py      custom tools: job_start/list/show/kill, notify, app_launch
+tools.py      custom tools: job_start/list/show/kill, notify
 zos           client shim (zenity + socat)
 zos.service   systemd --user unit
 ```
@@ -215,10 +253,12 @@ of this spec.
 
 ## Build order
 
-1. Smoke-test Agent SDK on Python 3.14 (pin 3.12 via `uv` if it breaks).
+1. ~~Smoke-test Agent SDK on Python 3.14~~ **done** — imports clean on 3.14.4, and
+   probing found the gate mechanism above (`PreToolUse` hook, not `can_use_tool`).
+   See `docs/superpowers/plans/notes-sdk-findings.md`.
 2. `zosd` skeleton: socket loop + one agent session + `notify` tool. Prove the loop
    end-to-end (hotkey → zenity → notification) with no permission gate yet.
-3. Permission gate + mode matcher + audit log + tests.
+3. Permission gate (`PreToolUse` hook) + mode matcher + audit log + tests.
 4. tmux job tools.
 5. systemd unit + `Super+Space` keybinding via `gsettings`.
 6. sudo askpass wiring.

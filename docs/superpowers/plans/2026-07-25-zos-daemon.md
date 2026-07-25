@@ -4,9 +4,11 @@
 
 **Goal:** Build `zosd`, a persistent headless Claude Agent SDK daemon on Ubuntu/GNOME Wayland that accepts plain-English intents over a Unix socket, gates every tool call through a fail-closed permission callback, and runs long work as detached tmux sessions.
 
-**Architecture:** One `systemd --user` Python process owns a Unix socket and a single long-lived `ClaudeSDKClient`. Dumb clients (`zenity --entry` piped to `socat`) push `{"source","text"}` JSON. Mode commands are matched and consumed by the daemon *before* the agent sees the text, so the agent has no code path to widen its own permissions. All tool calls route through `can_use_tool`, which auto-allows a Safe set, auto-allows metacharacter-free read-only Bash, and otherwise blocks on a `notify-send` action-button prompt whose every failure path resolves to deny. Long work becomes a tmux session, which supplies persistence, logging, status, viewer, and stop for free.
+**Architecture:** One `systemd --user` Python process owns a Unix socket and a single long-lived `ClaudeSDKClient`. Dumb clients (`zenity --entry` piped to `socat`) push `{"source","text"}` JSON. Mode commands are matched and consumed by the daemon *before* the agent sees the text, so the agent has no code path to widen its own permissions. All tool calls route through a `PreToolUse` hook, which auto-allows a Safe set, auto-allows metacharacter-free read-only Bash, and otherwise blocks on a `notify-send` action-button prompt whose every failure path resolves to deny. Long work becomes a tmux session, which supplies persistence, logging, status, viewer, and stop for free.
 
-**Tech Stack:** Python 3.14 (fallback: `uv`-pinned 3.12), `claude-agent-sdk` (Python), `asyncio` unix server, `tmux`, `libnotify` 0.8.8 (`notify-send -A ... -w`), `zenity`, `socat`, `systemd --user`, `gsettings`.
+**Plan amended 2026-07-25 after Task 1.** Task 1 probed the SDK and found the original mechanism unsound: `can_use_tool` is the *last* of six evaluation steps and never fires for `Bash`. The gate moved to a `PreToolUse` hook, which the SDK documents as running before every other step, with a deny that holds even in `bypassPermissions` mode. Evidence and the full evaluation order: `docs/superpowers/plans/notes-sdk-findings.md`.
+
+**Tech Stack:** Python 3.14.4 (verified working — no `uv` fallback needed), `claude-agent-sdk` (Python), `asyncio` unix server, `tmux`, `libnotify` 0.8.8 (`notify-send -A ... -w`), `zenity`, `socat`, `systemd --user`, `gsettings`.
 
 ## Global Constraints
 
@@ -16,13 +18,17 @@
 - **Audit log:** `~/.local/share/zos/audit.log`, one JSON object per line, appended in **every** mode for **every** tool call and verdict.
 - **Startup mode is always `guarded`.** No persistence of mode across process lifetime.
 - **Gate polarity is allow-list.** The code must read `if tool_name in SAFE_TOOLS: allow ... else: prompt`. Never `if tool_name in GUARDED: prompt else: allow` — the second form fails *open* on any unanticipated tool name.
+- **The gate is a `PreToolUse` hook.** Registered as `hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self.pre_tool_use])]}`. `matcher=None` matches every tool. Signature: `async def pre_tool_use(input_data: dict, tool_use_id: str | None, context: HookContext) -> dict`, reading `input_data["tool_name"]` and `input_data["tool_input"]`, returning `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow" | "deny", "permissionDecisionReason": str}}`. Verified: the hook fires for `Bash` with the command in `tool_input`; `can_use_tool` does not.
+- **`allowed_tools` MUST stay `[]`.** A bare entry auto-approves that tool before the gate — the SDK raises `CanUseToolShadowedWarning` when it detects this. Unlisted tools stay available to the agent, so an empty list costs nothing and closes a hole. Never add an entry "so the tool works."
+- **`setting_sources=[]`.** Prevents `zosd` inheriting allow-rules from `~/.claude/settings.json` or a project `.claude/settings.json`. This machine's user settings already carry `allow: ["Bash(node .claude/*)"]`.
+- **`can_use_tool` stays wired as a second layer.** It verifiably fires for `mcp__zos__*` tools. Both layers share `_decide_fast`, so there is one policy and two entry points.
 - **Every failure path in the prompt returns deny.** Timeout, dismissal, missing `notify-send`, dead notification daemon, any exception.
 - **Custom tool names are namespaced by the SDK.** `create_sdk_mcp_server(name="zos", ...)` exposes tools as `mcp__zos__<toolname>`. Built-ins stay bare. The gate matches a mixed namespace. Canonical literals used everywhere in this plan:
   - Safe: `Read`, `Grep`, `Glob`, `WebSearch`, `WebFetch`, `TodoWrite`, `mcp__zos__job_list`, `mcp__zos__notify`
   - Guarded: `Bash`, `Write`, `Edit`, `mcp__zos__job_start`, `mcp__zos__job_show`, `mcp__zos__job_kill`, and anything not in Safe
-- **Nothing blocks the event loop.** All subprocess work uses `asyncio.create_subprocess_exec`; the 60s prompt uses `asyncio.wait_for`. A blocking `subprocess.run` inside `can_use_tool` would stall the socket accept loop for the whole prompt.
-- **`can_use_tool(tool_name, input_data, context)` has no `source` parameter.** The daemon sets `self.current_source` / `self.current_intent` before `await client.query(...)` and the callback reads them. Safe only because requests are serialized under one `asyncio.Lock`. Do not invent a parallel request path.
-- **Tests:** one file, `test_zos.py`, plain `assert`, no framework. Run with `python3 test_zos.py`.
+- **Nothing blocks the event loop.** All subprocess work uses `asyncio.create_subprocess_exec`; the 60s prompt uses `asyncio.wait_for`. A blocking `subprocess.run` inside the gate would stall the socket accept loop for the whole prompt.
+- **Neither the hook nor `can_use_tool` receives a `source` parameter.** The daemon sets `self.current_source` / `self.current_intent` before `await client.query(...)` and both read them. Safe only because requests are serialized under one `asyncio.Lock`. Do not invent a parallel request path.
+- **Tests:** one file, `test_zos.py`, plain `assert`, no framework. Run with `.venv/bin/python test_zos.py` — the venv interpreter, since `zosd` imports `claude_agent_sdk`.
 - **Spec reconciliation:** the spec's Guarded table lists `app_launch`, but its custom-tools table does not and its prose says app launching is plain `Bash` + `gtk-launch`. This plan builds **no `app_launch` tool**; the table's mention is dropped.
 
 ## File Structure
@@ -41,7 +47,12 @@ docs/superpowers/plans/notes-sdk-findings.md   Task 1's recorded empirical answe
 
 ---
 
-### Task 1: Environment verification and recorded SDK findings
+### Task 1: Environment verification and recorded SDK findings — ✅ DONE (commit `1b7b929`)
+
+Executed 2026-07-25. Outcome, in full, is in `docs/superpowers/plans/notes-sdk-findings.md`.
+Headline: Python 3.14.4 works (no `uv` needed), and Q5 **failed** — `can_use_tool` never
+fires for `Bash`, which is why the gate is now a `PreToolUse` hook. The steps below are
+kept as the record of what was run; do not re-run them.
 
 The two flagged unknowns from the spec are settled here, empirically, and written down. Later tasks read the recorded answers instead of guessing.
 
@@ -277,7 +288,7 @@ Prove the whole loop end-to-end before adding security, so a failure is unambigu
 
 **Interfaces:**
 - Consumes: `tools.zos_server`; Task 1's Branch decision for `allowed_tools`.
-- Produces: `class Daemon` with `__init__(self)` taking no arguments and setting only in-memory state (so tests can construct it without connecting), `async def run(self)`, `async def handle(self, reader, writer)`. Attributes `self.auto: bool`, `self.current_source: str`, `self.current_intent: str`, `self.lock: asyncio.Lock`, `self.badge_id: str | None`, `self.client: ClaudeSDKClient | None`.
+- Produces: `class Daemon` with `__init__(self)` taking no arguments and setting only in-memory state (so tests can construct it without connecting), `async def run(self)`, `async def handle(self, reader, writer)`. Attributes `self.auto: bool`, `self.current_source: str`, `self.current_intent: str`, `self.lock: asyncio.Lock`, `self.badge_id: str | None`, `self.client: ClaudeSDKClient | None`, `self._last_verdict: tuple`.
 - Produces: module constants `SOCK: pathlib.Path`, `AUDIT: pathlib.Path`, `NOTIFY: str = "notify-send"`.
 - Produces: the client shim `zos`, which sends `{"source": "user", "text": <str>}` as one JSON object and closes the connection.
 
@@ -294,6 +305,7 @@ import pathlib
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
 )
@@ -312,8 +324,9 @@ mcp__zos__job_start as a tmux session, and you say so and return.
 For root, run `sudo -A <cmd>` so the OS's own password dialog appears.
 xdotool does not work on native Wayland windows; do not use it."""
 
-# ponytail: allowed_tools=[] per Task 1 Branch A — the can_use_tool callback is
-# the sole gate. Switch to the Branch B/C list only if notes-sdk-findings.md says so.
+# Task 1 proved a bare allowed_tools entry auto-approves that tool BEFORE the gate
+# runs. This list must stay empty forever. Unlisted tools are still available to the
+# agent, so empty costs nothing. Adding an entry silently disables the gate for it.
 ALLOWED_TOOLS: list[str] = []
 
 
@@ -325,9 +338,15 @@ class Daemon:
         self.badge_id = None
         self.lock = asyncio.Lock()
         self.client = None
+        self._last_verdict = (None, None)   # (tool_use_id, verdict) — see _resolve
+
+    # Both gate entry points are permissive stubs here; Task 4 replaces them.
+    async def pre_tool_use(self, input_data, tool_use_id, context):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "permissionDecision": "allow"}}
 
     async def can_use_tool(self, tool_name, input_data, context):
-        return PermissionResultAllow()   # replaced in Task 4
+        return PermissionResultAllow()
 
     async def handle(self, reader, writer):
         raw = await reader.read()   # to EOF — a bounded read can split the JSON
@@ -350,9 +369,12 @@ class Daemon:
         opts = ClaudeAgentOptions(
             model="claude-opus-5",
             mcp_servers={"zos": zos_server},
-            allowed_tools=ALLOWED_TOOLS,
+            allowed_tools=ALLOWED_TOOLS,      # always [] — see the constant
+            setting_sources=[],               # inherit no user/project allow-rules
             permission_mode="default",
-            can_use_tool=self.can_use_tool,
+            hooks={"PreToolUse": [HookMatcher(matcher=None,
+                                              hooks=[self.pre_tool_use])]},
+            can_use_tool=self.can_use_tool,   # second layer, MCP tools
             system_prompt={"type": "preset", "preset": "claude_code",
                            "append": SYSTEM_APPEND},
         )
@@ -431,8 +453,21 @@ git commit -m "feat: zosd socket loop with persistent agent session and zenity c
 ### Task 4: Permission gate, mode matcher, audit log, tests
 
 **Files:**
-- Modify: `zosd.py` (replace the `can_use_tool` stub; add the gate helpers, mode matcher, badge, audit)
+- Modify: `zosd.py` (replace both gate stubs; add the gate helpers, mode matcher, badge, audit)
 - Create: `test_zos.py`
+
+**Gate shape (amended after Task 1).** One policy, two entry points, so a change cannot
+apply to only half the tools:
+
+```
+pre_tool_use()   hook, matcher=None, sees EVERY tool including Bash   <- primary
+can_use_tool()   callback, fires for mcp__zos__* tools                <- second layer
+        \                    /
+         `-> _resolve() -> _decide_fast() + prompt_user() + audit()
+```
+
+`_resolve` is the single async policy function; the two entry points only translate its
+verdict into their respective return shapes.
 
 **Interfaces:**
 - Consumes: `Daemon` from Task 3, `tools.job_start` / `job_list` / `job_kill` handlers from Task 2.
@@ -441,6 +476,8 @@ git commit -m "feat: zosd socket loop with persistent agent session and zenity c
 - Produces: `async def prompt_user(intent: str, detail: str) -> str` — blocking action-button prompt returning `"allow"`, `"deny"` (user clicked Deny), or `"fail"` (timeout, dismissal, missing `notify-send`, dead notification daemon). Both non-`"allow"` values block; the distinction only selects `interrupt`.
 - Produces: `def audit(**fields) -> None`.
 - Produces: `Daemon._decide_fast(self, tool_name, input_data) -> tuple[bool | None, str]` — `(True, why)` allow, `(False, why)` deny, `(None, why)` must prompt. This is the pure, synchronous, fully testable core of the gate.
+- Produces: `Daemon._resolve(self, tool_name, input_data) -> tuple[bool, str, bool]` — `(allow, why, interrupt)`. The single async policy path: calls `_decide_fast`, prompts when it returns `None`, narrates in auto mode, and audits every verdict exactly once. Both entry points call it and nothing else.
+- Produces: `Daemon.pre_tool_use(self, input_data, tool_use_id, context) -> dict` — the `PreToolUse` hook, the primary gate. Reads `input_data["tool_name"]` and `input_data["tool_input"]`, returns `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"|"deny", "permissionDecisionReason": why}}`.
 - Produces: `Daemon.set_mode(self, auto: bool, source: str)` (async), `Daemon._narrate(self, detail: str)` (async, non-blocking).
 - Produces: module constants `SAFE_TOOLS: set[str]`, `METACHARS: set[str]`, `SAFE_PREFIXES: list[tuple[str, ...]]`.
 
@@ -448,8 +485,10 @@ git commit -m "feat: zosd socket loop with persistent agent session and zenity c
 
 ```python
 #!/usr/bin/env python3
-"""Z.OS tests. Plain asserts, no framework. Run: python3 test_zos.py"""
+"""Z.OS tests. Plain asserts, no framework. Run: .venv/bin/python test_zos.py"""
 import asyncio
+import pathlib
+import types
 
 import tools
 import zosd
@@ -529,6 +568,73 @@ def test_prompt_denies_when_the_prompt_mechanism_is_broken():
         assert asyncio.run(zosd.prompt_user("do a thing", "rm -rf /")) == "fail"
     finally:
         zosd.NOTIFY = saved
+
+
+def test_hook_denies_bash_when_the_prompt_fails():
+    # The primary gate. can_use_tool never sees Bash (Task 1), so this hook is the
+    # only thing standing between the model and an arbitrary shell command.
+    saved = zosd.NOTIFY
+    zosd.NOTIFY = "zos-no-such-binary"          # forces prompt_user -> "fail"
+    try:
+        out = asyncio.run(zosd.Daemon().pre_tool_use(
+            {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}, "tu_1", None))
+    finally:
+        zosd.NOTIFY = saved
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+
+
+def test_hook_allows_readonly_bash_without_prompting():
+    out = asyncio.run(zosd.Daemon().pre_tool_use(
+        {"tool_name": "Bash", "tool_input": {"command": "git status"}}, "tu_2", None))
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_hook_denies_an_unknown_tool_when_the_prompt_fails():
+    # Allow-list polarity end to end: a tool nobody predicted reaches the prompt,
+    # and a failed prompt is a deny.
+    saved = zosd.NOTIFY
+    zosd.NOTIFY = "zos-no-such-binary"
+    try:
+        out = asyncio.run(zosd.Daemon().pre_tool_use(
+            {"tool_name": "ToolFromNextYear", "tool_input": {}}, "tu_3", None))
+    finally:
+        zosd.NOTIFY = saved
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_one_call_reaching_both_layers_prompts_only_once():
+    # The hook and the callback can both fire for the same tool_use_id. Without the
+    # verdict cache the user is asked twice for one command and it is audited twice.
+    d = zosd.Daemon()
+    calls = []
+
+    async def fake_prompt(intent, detail):
+        calls.append(detail)
+        return "allow"
+
+    saved = zosd.prompt_user
+    zosd.prompt_user = fake_prompt
+    try:
+        async def both():
+            await d.pre_tool_use(
+                {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x"}},
+                "tu_same", None)
+            ctx = types.SimpleNamespace(tool_use_id="tu_same")
+            return await d.can_use_tool("Write", {"file_path": "/tmp/x"}, ctx)
+        result = asyncio.run(both())
+    finally:
+        zosd.prompt_user = saved
+    assert len(calls) == 1, f"prompted {len(calls)} times for one tool call"
+    assert isinstance(result, zosd.PermissionResultAllow)
+
+
+def test_allowed_tools_is_empty_and_settings_are_not_inherited():
+    # Both are load-bearing: a bare allowed_tools entry auto-approves that tool before
+    # the gate, and inherited settings allow-rules do the same from outside the repo.
+    assert zosd.ALLOWED_TOOLS == []
+    src = pathlib.Path(zosd.__file__).read_text()
+    assert "setting_sources=[]" in src
 
 
 def test_job_start_creates_a_real_tmux_session_and_job_kill_removes_it():
@@ -640,7 +746,7 @@ async def prompt_user(intent: str, detail: str) -> str:
         return "fail"
 ```
 
-Replace the `can_use_tool` stub and add the rest of the `Daemon` methods:
+Replace **both** gate stubs (`pre_tool_use` and `can_use_tool`) and add the rest of the `Daemon` methods:
 
 ```python
     def _decide_fast(self, tool_name, input_data):
@@ -669,7 +775,14 @@ Replace the `can_use_tool` stub and add the rest of the `Daemon` methods:
             NOTIFY, "Z.OS (auto)", detail[:200],
             stderr=asyncio.subprocess.DEVNULL)
 
-    async def can_use_tool(self, tool_name, input_data, context):
+    async def _resolve(self, tool_name, input_data, tool_use_id=None):
+        """The single policy path. Returns (allow, why, interrupt). Both the hook and
+        the callback route through here, so one policy covers every tool."""
+        # ponytail: one-entry cache, not a dict — calls are serialized under self.lock
+        # so at most one is in flight. Without it, a tool that reaches BOTH the hook and
+        # the callback would prompt the user twice for one command and double-audit it.
+        if tool_use_id is not None and self._last_verdict[0] == tool_use_id:
+            return self._last_verdict[1]
         allow, why = self._decide_fast(tool_name, input_data)
         detail = self._render(tool_name, input_data)
         interrupt = False
@@ -684,9 +797,36 @@ Replace the `can_use_tool` stub and add the rest of the `Daemon` methods:
         audit(tool=tool_name, detail=detail, verdict="allow" if allow else "deny",
               reason=why, mode="auto" if self.auto else "guarded",
               source=self.current_source, intent=self.current_intent)
+        if allow and why == "auto mode":
+            await self._narrate(detail)
+        verdict = (allow, why, interrupt)
+        if tool_use_id is not None:
+            self._last_verdict = (tool_use_id, verdict)
+        return verdict
+
+    async def pre_tool_use(self, input_data, tool_use_id, context):
+        """PRIMARY GATE. Runs before every other permission step and sees every tool,
+        including Bash — which can_use_tool never sees (verified, see
+        docs/superpowers/plans/notes-sdk-findings.md). A hook deny holds even in
+        bypassPermissions mode."""
+        allow, why, _ = await self._resolve(
+            input_data.get("tool_name", ""),
+            input_data.get("tool_input") or {},
+            tool_use_id or input_data.get("tool_use_id"),
+        )
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow" if allow else "deny",
+            "permissionDecisionReason": f"Z.OS gate: {why}",
+        }}
+
+    async def can_use_tool(self, tool_name, input_data, context):
+        """Second layer. In practice reached only by mcp__zos__* tools, since the hook
+        already resolved everything else. Kept so the custom tools stay gated if hook
+        dispatch ever changes."""
+        allow, why, interrupt = await self._resolve(
+            tool_name, input_data, getattr(context, "tool_use_id", None))
         if allow:
-            if why == "auto mode":
-                await self._narrate(detail)
             return PermissionResultAllow()
         return PermissionResultDeny(message=f"Z.OS gate: {why}", interrupt=interrupt)
 
@@ -746,7 +886,7 @@ Add the mode short-circuit inside `handle`, immediately after `source` is read a
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd /run/media/yash/External/Zerostic/Z.OS && .venv/bin/python test_zos.py`
-Expected: `ok test_...` for all eleven tests, then `all passed`.
+Expected: an `ok test_...` line for every test, then `all passed`.
 
 - [ ] **Step 5: Verify the prompt and the audit log by hand**
 
@@ -920,7 +1060,7 @@ Append a short `## Install` section to `docs/superpowers/specs/2026-07-25-zos-da
 | Persistent `ClaudeSDKClient`, one session | 3 (Step 4 proves it) |
 | Dumb stateless client, `{"source","text"}` | 3 |
 | Client never parses | 3 (`zos` sends raw text) |
-| `can_use_tool` is the entire gate | 1 (verified), 4 |
+| A gate no tool call can route around | 1 (probed — `can_use_tool` insufficient), 4 (`PreToolUse` hook, `matcher=None`, `allowed_tools=[]`, `setting_sources=[]`) |
 | Safe vs Guarded tool classes | 4 (`SAFE_TOOLS`, allow-list polarity) |
 | No hard never-list | 4 (`sudo`/`rm -rf` prompt, allowed in auto) |
 | Metacharacter check | 4 (`judge_bash`, `METACHARS`) |
@@ -952,4 +1092,4 @@ No gaps. Two deliberate non-implementations, both stated: the NOPASSWD sudoers p
 
 **2. Placeholder scan.** Every code step carries runnable code. The only intentional fill-in-the-blank is `notes-sdk-findings.md`, whose angle brackets are the recorded *output* of Step 4, not deferred work — and Tasks 2/4 name the exact branch each answer selects. No "add error handling," no "similar to Task N," no "write tests for the above."
 
-**3. Type and name consistency.** `judge_bash`, `match_mode`, `prompt_user`, `audit`, `_decide_fast`, `_render`, `set_mode`, `_narrate`, `_badge_on`, `_badge_off`, `NOTIFY`, `SOCK`, `AUDIT`, `SAFE_TOOLS`, `METACHARS`, `SAFE_PREFIXES`, `MODE_WORDS`, `ALLOWED_TOOLS`, `SYSTEM_APPEND`, `zos_server`, `sh`, `ok` are each defined once and spelled identically in every later reference and in `test_zos.py`. `_decide_fast` returns `(bool | None, str)` everywhere, and the tests index `[0]`. `prompt_user` returns `str` (`"allow"`/`"deny"`/`"fail"`) in its Interfaces block, its implementation, its single call site in `can_use_tool`, and its test — not `bool`. Custom tool names are `mcp__zos__*` in `SAFE_TOOLS`, `SYSTEM_APPEND`, and the tests, and bare in `tools.py`'s `@tool(...)` decorators — which is correct, since the SDK adds the prefix.
+**3. Type and name consistency.** `judge_bash`, `match_mode`, `prompt_user`, `audit`, `_decide_fast`, `_render`, `set_mode`, `_narrate`, `_badge_on`, `_badge_off`, `NOTIFY`, `SOCK`, `AUDIT`, `SAFE_TOOLS`, `METACHARS`, `SAFE_PREFIXES`, `MODE_WORDS`, `ALLOWED_TOOLS`, `SYSTEM_APPEND`, `zos_server`, `sh`, `ok` are each defined once and spelled identically in every later reference and in `test_zos.py`. `_decide_fast` returns `(bool | None, str)` everywhere, and the tests index `[0]`. `prompt_user` returns `str` (`"allow"`/`"deny"`/`"fail"`) in its Interfaces block, its implementation, its single call site in `_resolve`, and its test — not `bool`. `_resolve` returns `(bool, str, bool)` and is the only caller of `_decide_fast`, `prompt_user`, `audit` and `_narrate`; `pre_tool_use` and `can_use_tool` call `_resolve` and nothing else. Custom tool names are `mcp__zos__*` in `SAFE_TOOLS`, `SYSTEM_APPEND`, and the tests, and bare in `tools.py`'s `@tool(...)` decorators — which is correct, since the SDK adds the prefix.

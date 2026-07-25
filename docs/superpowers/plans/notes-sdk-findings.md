@@ -64,22 +64,67 @@ ClaudeAgentOptions(hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[pre_
 
 `HookMatcher(matcher=...)` takes a tool-name pattern; `matcher=None` matches every tool.
 
+## U1 RESOLVED from primary docs (2026-07-25)
+
+The deny probe run died on the session limit, so `deny` was not confirmed by execution.
+It is confirmed by the SDK's own permission documentation
+(`code.claude.com/docs/en/agent-sdk/permissions`), verbatim:
+
+> **Hooks.** Run hooks first. A hook can deny the call outright or pass it on. A hook
+> that returns `allow` does not skip the deny and ask rules below; those are evaluated
+> regardless of the hook result.
+
+> For checks that must run on every tool call, use a `PreToolUse` hook: hooks run before
+> every other step, and **a hook deny applies even in `bypassPermissions` mode**.
+
+And the documented six-step order, which is the reason `can_use_tool` was the wrong hook
+point — five steps can approve a call before it is reached:
+
+```
+1. hooks          <- Z.OS gate; deny here always wins
+2. deny rules     (disallowed_tools, settings.json)
+3. ask rules      (settings.json)
+4. permission mode
+5. allow rules    (allowed_tools, settings.json)   <- keep empty
+6. can_use_tool   <- last resort; MCP tools in practice
+```
+
+Also documented, and the direct explanation of Q4:
+
+> **Auto-approved tools never reach `canUseTool`.** A tool call approved at any earlier
+> step, by `acceptEdits` or `bypassPermissions`, or by an allow rule, skips your
+> `canUseTool` callback, so permission checks you put there are silently bypassed for
+> that tool.
+
+**Still worth one empirical check when quota allows** (cheap, not load-bearing for the
+design): re-run `/tmp/zos-hook-probe.py` run B and confirm the denied `echo hi` does not
+execute. The design no longer depends on the outcome — the docs are explicit — but a
+green run closes the loop. Task 4's `test_hook_denies_bash_when_the_prompt_fails` tests
+the daemon's half of this (the hook returns `deny`) without any API call.
+
+### Why `Bash` was pre-approved here — unexplained, and mitigated anyway
+
+`can_use_tool` should have been reached for `Bash` in `default` mode with
+`allowed_tools=[]`. It was not. Checked and ruled out: no `/etc/claude-code/managed-settings.json`,
+no bypass-related env vars, and the only user allow-rule is `Bash(node .claude/*)`, which
+`echo hi` does not match. The probe ran nested inside a Claude Code session
+(`CLAUDECODE=1`, `CLAUDE_CODE_ENTRYPOINT` set), which is the likeliest source of an
+inherited approval path. Unresolved, and deliberately not chased: the fix does not depend
+on the cause. Hooks run at step 1, before anything that could have approved it, and
+`setting_sources=[]` removes the inherited-settings vector regardless.
+
 ## Unverified — session limit hit
 
 The probe's remaining two runs died on `You've hit your session limit · resets 1:20pm
 (Asia/Kolkata)`. Their output is void, not negative:
 
-- **U1 — can a `PreToolUse` hook actually DENY?** The hook demonstrably *fires* and
-  *sees* the command. Whether `permissionDecision: "deny"` blocks execution is
-  **NOT VERIFIED**. This is load-bearing: the whole design rests on it.
-- **U2 — does `setting_sources=[]` stop settings-file allow rules from shadowing the
-  callback?** Not verified. Relevant because `~/.claude/settings.json` on this machine
-  carries `allow: ["Bash(node .claude/*)"]`, and a daemon inheriting user settings
-  inherits that hole. Belt-and-braces regardless: set `setting_sources=[]` so `zosd`
-  never reads user/project/local settings.
-
-Re-run `/tmp/zos-hook-probe.py` after the limit resets to settle U1 and U2 before
-Task 3 wires the real gate.
+- **U1 — can a `PreToolUse` hook actually DENY?** Resolved from primary docs above. One
+  empirical confirmation still pending, no longer blocking.
+- **U2 — does `setting_sources=[]` exclude settings-file allow rules?** Documented:
+  *"These rules are read when the `project` setting source is enabled... If you set
+  `setting_sources` explicitly, include `"project"` for them to apply."* So an explicit
+  empty list excludes them. Not independently probed. Adopted regardless — it can only
+  remove permission sources, never add one.
 
 ## Decision for Task 2
 
