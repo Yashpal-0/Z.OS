@@ -101,6 +101,8 @@ async def gate(tool_name, input_data, context):
 
 async def run(allowed):
     seen.clear()
+    # Bash matters as much as the MCP tools: `tools` and `allowed_tools` are
+    # separate axes, and Bash is the gate's primary consumer.
     opts = ClaudeAgentOptions(
         model="claude-opus-5",
         mcp_servers={"zos": server},
@@ -110,7 +112,10 @@ async def run(allowed):
     )
     text = []
     async with ClaudeSDKClient(options=opts) as client:
-        await client.query("Call the ping tool exactly once, then tell me what it returned.")
+        await client.query(
+            "Run `echo hi` using Bash, then call the ping tool exactly once, "
+            "then tell me what each returned."
+        )
         async for msg in client.receive_response():
             text.append(str(msg))
     joined = "\n".join(text)
@@ -130,6 +135,7 @@ Run: `.venv/bin/python /tmp/zos-smoke.py`
 - **Q2** Which interpreter path works — `.venv/bin/python` on 3.14, or the uv-pinned 3.12?
 - **Q3** With `allowed_tools=[]`, did the gate fire for `mcp__zos__ping`, and was the tool reachable (`pong` present)?
 - **Q4** With `allowed_tools=["mcp__zos__ping"]`, did the gate still fire, or was it bypassed?
+- **Q5** Did the gate fire for `Bash` in either run? (built-ins are a separate axis from MCP tools)
 
 - [ ] **Step 5: Record the answers**
 
@@ -142,6 +148,9 @@ Write `docs/superpowers/plans/notes-sdk-findings.md`:
 - **Q2 interpreter:** <.venv/bin/python (3.14) | .venv/bin/python (uv-pinned 3.12)>
 - **Q3 allowed_tools=[]:** gate fired: <yes|no>; mcp tool reachable: <yes|no>
 - **Q4 allowed_tools listed:** gate fired: <yes|no> (no = listing pre-approves and bypasses the gate)
+- **Q5 Bash:** gate fired for `Bash` with allowed_tools=[]: <yes|no>. If no, STOP —
+  the whole permission model rests on the callback seeing every `Bash` call. Do not
+  proceed to Task 2; report it.
 
 ## Decision for Task 2
 
@@ -282,7 +291,12 @@ import json
 import os
 import pathlib
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, PermissionResultAllow
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
+)
 
 from tools import zos_server
 
@@ -316,7 +330,7 @@ class Daemon:
         return PermissionResultAllow()   # replaced in Task 4
 
     async def handle(self, reader, writer):
-        raw = await reader.read(65536)
+        raw = await reader.read()   # to EOF — a bounded read can split the JSON
         writer.close()
         try:
             msg = json.loads(raw or b"{}")
@@ -424,10 +438,10 @@ git commit -m "feat: zosd socket loop with persistent agent session and zenity c
 - Consumes: `Daemon` from Task 3, `tools.job_start` / `job_list` / `job_kill` handlers from Task 2.
 - Produces: `def judge_bash(cmd: str) -> bool` — `True` means auto-allow.
 - Produces: `def match_mode(text: str) -> bool | None` — `True` for `auto`, `False` for `guarded`, `None` for anything else (not a mode command).
-- Produces: `async def prompt_user(intent: str, detail: str) -> bool` — blocking action-button prompt; `False` on every failure.
+- Produces: `async def prompt_user(intent: str, detail: str) -> str` — blocking action-button prompt returning `"allow"`, `"deny"` (user clicked Deny), or `"fail"` (timeout, dismissal, missing `notify-send`, dead notification daemon). Both non-`"allow"` values block; the distinction only selects `interrupt`.
 - Produces: `def audit(**fields) -> None`.
 - Produces: `Daemon._decide_fast(self, tool_name, input_data) -> tuple[bool | None, str]` — `(True, why)` allow, `(False, why)` deny, `(None, why)` must prompt. This is the pure, synchronous, fully testable core of the gate.
-- Produces: `Daemon.set_mode(self, auto: bool, source: str)` (async).
+- Produces: `Daemon.set_mode(self, auto: bool, source: str)` (async), `Daemon._narrate(self, detail: str)` (async, non-blocking).
 - Produces: module constants `SAFE_TOOLS: set[str]`, `METACHARS: set[str]`, `SAFE_PREFIXES: list[tuple[str, ...]]`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -511,7 +525,8 @@ def test_prompt_denies_when_the_prompt_mechanism_is_broken():
     saved = zosd.NOTIFY
     zosd.NOTIFY = "zos-no-such-binary"
     try:
-        assert asyncio.run(zosd.prompt_user("do a thing", "rm -rf /")) is False
+        # "fail", not "deny": a broken prompt must never be reported as a user choice.
+        assert asyncio.run(zosd.prompt_user("do a thing", "rm -rf /")) == "fail"
     finally:
         zosd.NOTIFY = saved
 
@@ -541,7 +556,19 @@ Expected: FAIL with `AttributeError: module 'zosd' has no attribute 'judge_bash'
 
 - [ ] **Step 3: Add the gate helpers, mode matcher, badge, and audit to `zosd.py`**
 
-Insert after the `NOTIFY` constant:
+First confirm the import block at the top of `zosd.py` names **both** results — the
+stub only needed `PermissionResultAllow`, and the gate below returns `PermissionResultDeny`:
+
+```python
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
+)
+```
+
+Then insert after the `NOTIFY` constant:
 
 ```python
 import shlex
@@ -592,9 +619,11 @@ def audit(**fields) -> None:
         f.write(json.dumps({"ts": time.time(), **fields}, default=str) + "\n")
 
 
-async def prompt_user(intent: str, detail: str) -> bool:
-    """Blocking allow/deny prompt with no window. Every failure path is deny:
-    the failure mode of the prompt system must be 'nothing happens'."""
+async def prompt_user(intent: str, detail: str) -> str:
+    """Blocking allow/deny prompt with no window. Returns "allow", "deny" (the user
+    clicked Deny) or "fail" (timeout, dismissal, missing notify-send, dead
+    notification daemon). Only "allow" permits the call — the failure mode of the
+    prompt system must be 'nothing happens'."""
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -603,11 +632,12 @@ async def prompt_user(intent: str, detail: str) -> bool:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        return out.decode(errors="replace").strip() == "allow"
+        answer = out.decode(errors="replace").strip()
+        return answer if answer in ("allow", "deny") else "fail"
     except Exception:
         if proc is not None and proc.returncode is None:
             proc.kill()
-        return False
+        return "fail"
 ```
 
 Replace the `can_use_tool` stub and add the rest of the `Daemon` methods:
@@ -632,18 +662,33 @@ Replace the `can_use_tool` stub and add the rest of the `Daemon` methods:
             return str(input_data.get("command", ""))
         return f"{tool_name} {json.dumps(input_data, default=str)[:300]}"
 
+    async def _narrate(self, detail: str):
+        """Auto mode trades the veto, not the visibility. No prompt fired, so this
+        after-the-fact notification is the only real-time signal that this ran."""
+        await asyncio.create_subprocess_exec(
+            NOTIFY, "Z.OS (auto)", detail[:200],
+            stderr=asyncio.subprocess.DEVNULL)
+
     async def can_use_tool(self, tool_name, input_data, context):
         allow, why = self._decide_fast(tool_name, input_data)
         detail = self._render(tool_name, input_data)
+        interrupt = False
         if allow is None:
-            allow = await prompt_user(self.current_intent, detail)
-            why = "user allowed" if allow else "user denied or prompt failed"
+            answer = await prompt_user(self.current_intent, detail)
+            allow = answer == "allow"
+            why = {"allow": "user allowed", "deny": "user denied",
+                   "fail": "prompt failed"}[answer]
+            # An explicit Deny stops the turn; a bare deny just hands the message
+            # back and the model retries a variant of the same command.
+            interrupt = answer == "deny"
         audit(tool=tool_name, detail=detail, verdict="allow" if allow else "deny",
               reason=why, mode="auto" if self.auto else "guarded",
               source=self.current_source, intent=self.current_intent)
         if allow:
+            if why == "auto mode":
+                await self._narrate(detail)
             return PermissionResultAllow()
-        return PermissionResultDeny(message=f"Z.OS gate: {why}")
+        return PermissionResultDeny(message=f"Z.OS gate: {why}", interrupt=interrupt)
 
     async def _badge_on(self):
         if self.badge_id:
@@ -723,6 +768,16 @@ Expected: a JSON line with `"verdict": "deny"`. Repeat and click **Allow**; conf
 ./zos "create an empty file at /tmp/zos-auto-check"   # runs with no prompt
 ./zos "guarded"  # badge closes, confirmation notification appears
 ```
+
+During the middle command, expect **two** notifications: a `Z.OS (auto)` line showing
+the actual command that just ran, and the agent's own result. The first is the
+narration — in sticky auto with no prompts and no expiry it is the only real-time
+signal that something happened, so its absence is a bug, not cosmetic.
+
+```bash
+grep -c '"reason": "auto mode"' ~/.local/share/zos/audit.log
+```
+Expected: at least 1.
 
 - [ ] **Step 7: Commit**
 
@@ -875,6 +930,8 @@ Append a short `## Install` section to `docs/superpowers/specs/2026-07-25-zos-da
 | Auto reverts on restart | 4 (fresh-state test), 5 (Step 4, live) |
 | Resident critical badge while auto | 4 (`_badge_on`/`_badge_off`) |
 | Audited in every mode | 4 (`audit` called on every verdict) |
+| Auto narrates after the fact ("trades the veto, not the visibility") | 4 (`_narrate`, fired when `why == "auto mode"`; Step 6 verifies) |
+| Explicit Deny means "nothing happens", not a retried variant | 4 (`prompt_user` returns `"deny"` vs `"fail"`; `interrupt=True` only on `"deny"`) |
 | Mode matched by daemon, consumed, never forwarded | 4 (`handle` short-circuit before the lock) |
 | Strict literal mode match | 4 (`test_mode_matcher_is_strict`) |
 | `source` field gates auto mode | 4 (`test_auto_mode_only_applies_to_the_human_at_the_keyboard`) |
@@ -895,4 +952,4 @@ No gaps. Two deliberate non-implementations, both stated: the NOPASSWD sudoers p
 
 **2. Placeholder scan.** Every code step carries runnable code. The only intentional fill-in-the-blank is `notes-sdk-findings.md`, whose angle brackets are the recorded *output* of Step 4, not deferred work — and Tasks 2/4 name the exact branch each answer selects. No "add error handling," no "similar to Task N," no "write tests for the above."
 
-**3. Type and name consistency.** `judge_bash`, `match_mode`, `prompt_user`, `audit`, `_decide_fast`, `_render`, `set_mode`, `_badge_on`, `_badge_off`, `NOTIFY`, `SOCK`, `AUDIT`, `SAFE_TOOLS`, `METACHARS`, `SAFE_PREFIXES`, `MODE_WORDS`, `ALLOWED_TOOLS`, `SYSTEM_APPEND`, `zos_server`, `sh`, `ok` are each defined once and spelled identically in every later reference and in `test_zos.py`. `_decide_fast` returns `(bool | None, str)` everywhere, and the tests index `[0]`. Custom tool names are `mcp__zos__*` in `SAFE_TOOLS`, `SYSTEM_APPEND`, and the tests, and bare in `tools.py`'s `@tool(...)` decorators — which is correct, since the SDK adds the prefix.
+**3. Type and name consistency.** `judge_bash`, `match_mode`, `prompt_user`, `audit`, `_decide_fast`, `_render`, `set_mode`, `_narrate`, `_badge_on`, `_badge_off`, `NOTIFY`, `SOCK`, `AUDIT`, `SAFE_TOOLS`, `METACHARS`, `SAFE_PREFIXES`, `MODE_WORDS`, `ALLOWED_TOOLS`, `SYSTEM_APPEND`, `zos_server`, `sh`, `ok` are each defined once and spelled identically in every later reference and in `test_zos.py`. `_decide_fast` returns `(bool | None, str)` everywhere, and the tests index `[0]`. `prompt_user` returns `str` (`"allow"`/`"deny"`/`"fail"`) in its Interfaces block, its implementation, its single call site in `can_use_tool`, and its test — not `bool`. Custom tool names are `mcp__zos__*` in `SAFE_TOOLS`, `SYSTEM_APPEND`, and the tests, and bare in `tools.py`'s `@tool(...)` decorators — which is correct, since the SDK adds the prefix.
