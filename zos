@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Z.OS client. No parsing, ever — the daemon's agent decides what the text means.
+set -euo pipefail
+
+if [ "$#" -gt 0 ]; then
+  text="$*"
+else
+  text="$(zenity --entry --title="Z.OS" --text="" 2>/dev/null || true)"
+fi
+[ -n "$text" ] || exit 0
+
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"source":"user","text":sys.argv[1]}))' "$text" \
+  | socat - "UNIX-CONNECT:$XDG_RUNTIME_DIR/zos.sock"
