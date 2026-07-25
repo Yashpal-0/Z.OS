@@ -104,19 +104,21 @@ guarded  (default)  — Safe auto-allows; everything else prompts
 auto                — everything allows; nothing prompts
 ```
 
-Auto is safe to offer because of three properties:
+Auto is **sticky**: once on, it stays on until you say `guarded`. It does **not**
+time out. Two properties keep it survivable:
 
-- **Explicit and time-boxed.** Never the startup state, never sticky. Enabled for a
-  window ("auto for 30m"); reverts on expiry or daemon restart, whichever first.
+- **Reverts on daemon restart.** Startup state is always `guarded`. A crash, a reboot,
+  or `systemctl --user restart zos` drops back to guarded — auto is never the state you
+  wake up to, only the state you explicitly set this session.
 - **Visible while on.** A resident `notify-send -u critical -t 0` badge stays up the
-  whole time auto is live.
+  whole time auto is live, so the mode is never silent.
 - **Still audited, still narrated.** Every action is logged in every mode; destructive
   ones fire an after-the-fact notification. Auto trades the veto, not the visibility.
 
 **Mode commands are matched by the daemon, not the agent.** Because plain English is the
 only input, "go full auto" is also plain English — if mode switching were an agent tool,
 a prompt-injected page or file could talk the agent into disabling its own gate. `zosd`
-does a strict literal match on the incoming string (`auto`, `auto for 30m`, `guarded`),
+does a strict literal match on the incoming string (`auto`, `guarded`),
 consumes it, and never forwards it. ~5 lines, no NLU. The agent has no code path to change
 its own permissions. Strict matching is deliberate: a missed "go full auto" is a harmless
 retype; a fuzzy match that fires on "don't go full auto" is not.
@@ -200,7 +202,7 @@ Plus this spec and one test file.
 
 - metacharacter check rejects `ls; rm -rf ~`
 - guarded mode denies when the prompt mechanism fails
-- auto mode expires and reverts to guarded
+- auto mode is sticky (does not expire) but resets to guarded on daemon restart
 - a mode command is consumed by the daemon and never reaches the agent
 - `job_start` creates a real tmux session; `job_kill` removes it
 
