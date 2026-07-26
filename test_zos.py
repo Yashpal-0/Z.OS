@@ -6,6 +6,7 @@ loop and gate are testable offline and for free.
 """
 import asyncio
 import json
+import os
 import pathlib
 import tempfile
 
@@ -571,3 +572,119 @@ if __name__ == "__main__":
             _fn()
             print("ok", _name)
     print("all passed")
+
+
+# ---- hotkey ----------------------------------------------------------------
+
+def test_input_event_struct_matches_the_kernel_layout():
+    # 24 bytes on x86-64: struct timeval (two longs), __u16 type, __u16 code, __s32 value.
+    # If this is wrong every field is misread and the hotkey silently never fires.
+    assert zosd._EVENT.size == 24, zosd._EVENT.size
+
+
+def test_meta_then_space_fires_once_not_on_autorepeat():
+    h = zosd.Hotkey()
+    assert h.feed(zosd.EV_KEY, 125, 1) is False          # Meta down is not the hotkey
+    assert h.feed(zosd.EV_KEY, zosd.KEY_SPACE, 1) is True
+    # Autorepeat (value 2) must not open a second dialog, nor must the release.
+    assert h.feed(zosd.EV_KEY, zosd.KEY_SPACE, 2) is False
+    assert h.feed(zosd.EV_KEY, zosd.KEY_SPACE, 0) is False
+
+
+def test_space_alone_is_not_the_hotkey():
+    h = zosd.Hotkey()
+    assert h.feed(zosd.EV_KEY, zosd.KEY_SPACE, 1) is False
+    h.feed(zosd.EV_KEY, 125, 1)
+    h.feed(zosd.EV_KEY, 125, 0)                          # Meta released again
+    assert h.feed(zosd.EV_KEY, zosd.KEY_SPACE, 1) is False
+
+
+def test_the_listener_remembers_nothing_but_the_modifier():
+    """The privacy guarantee. Feeding a password's worth of keystrokes must leave no trace
+    of them in the detector — only Meta state is ever retained."""
+    h = zosd.Hotkey()
+    for code in (30, 31, 32, 33, 34, 35, 2, 3, 4):       # a,s,d,f,g,h,1,2,3
+        h.feed(zosd.EV_KEY, code, 1)
+        h.feed(zosd.EV_KEY, code, 0)
+    assert h.held == set(), h.held
+    assert h.__dict__ == {"held": set()}, h.__dict__
+
+
+def test_non_key_events_are_ignored():
+    h = zosd.Hotkey()
+    h.feed(zosd.EV_KEY, 125, 1)
+    assert h.feed(0x03, zosd.KEY_SPACE, 1) is False      # EV_ABS, not a keypress
+
+
+# ---- delegation ------------------------------------------------------------
+
+def test_delegate_refuses_without_a_real_directory():
+    """The worker would otherwise inherit the daemon's cwd — Z.OS's own repo — and edit
+    the wrong tree with write access."""
+    for bad in ({}, {"cwd": ""}, {"cwd": "/nonexistent/zos-target"}):
+        out = asyncio.run(tools.HANDLERS["delegate"](
+            {"agent": "codex", "task": "x", **bad}))
+        assert "existing directory" in out, (bad, out)
+
+
+def test_no_worker_is_started_with_approvals_bypassed():
+    """Live sessions mean Z.OS can answer a worker's own prompts, so bypassing them would
+    discard the second checkpoint for nothing."""
+    for agent, (flags, _seeds) in tools.AGENT_FLAGS.items():
+        for banned in ("--dangerously", "--yes-always", "skip-permissions"):
+            assert banned not in flags, (agent, flags)
+
+
+def test_the_delegate_prompt_shows_the_directory_and_the_whole_task():
+    task = "add a --upper flag and a test for it, then run the suite"
+    shown = tools.render("delegate", {"agent": "codex", "task": task,
+                                      "cwd": "/tmp/zos-deleg"})
+    assert task in shown and "/tmp/zos-deleg" in shown, shown
+
+
+def test_job_send_is_never_safe_but_job_read_is():
+    # Keystrokes into a session holding a coding agent can do anything that agent can.
+    assert "job_send" not in tools.SAFE
+    assert "job_read" in tools.SAFE
+
+
+def test_job_send_prompt_shows_what_will_be_typed():
+    shown = tools.render("job_send", {"name": "zos-w-codex", "text": "y", "keys": "Enter"})
+    assert "zos-w-codex" in shown and "y" in shown and "Enter" in shown, shown
+
+
+def _fake_tmux(td, script):
+    """tmux is resolved via PATH, so a stub ahead of it makes send-keys deterministic."""
+    fake = pathlib.Path(td, "tmux")
+    fake.write_text(script)
+    fake.chmod(0o755)
+    return td
+
+
+def test_job_send_reports_success_when_the_command_is_silent():
+    """sh() folds a silent success into the truthy string "exit 0", so branching on it
+    read a working send as a failure — and the model, told the send failed, would send
+    the same keystrokes into a live coding agent a second time."""
+    with tempfile.TemporaryDirectory() as td:
+        _fake_tmux(td, "#!/bin/sh\nexit 0\n")
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = f"{td}:{saved}"
+        try:
+            out = asyncio.run(tools.HANDLERS["job_send"](
+                {"name": "s", "text": "y", "keys": "Enter"}))
+        finally:
+            os.environ["PATH"] = saved
+    assert "could not" not in out, out
+    assert "sent" in out and "Enter" in out, out
+
+
+def test_job_send_still_reports_a_real_failure():
+    with tempfile.TemporaryDirectory() as td:
+        _fake_tmux(td, "#!/bin/sh\necho 'no such session: nope' >&2\nexit 1\n")
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = f"{td}:{saved}"
+        try:
+            out = asyncio.run(tools.HANDLERS["job_send"]({"name": "nope", "keys": "Enter"}))
+        finally:
+            os.environ["PATH"] = saved
+    assert "could not" in out and "no such session" in out, out
