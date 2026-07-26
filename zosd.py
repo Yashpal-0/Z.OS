@@ -128,13 +128,17 @@ async def prompt_user(intent: str, detail: str) -> str:
 def _png_data_url(ppm_path: str) -> str:
     """QMP screendump writes PPM; the API needs PNG. ffmpeg is already installed,
     so convert with it rather than adding Pillow.
+    The PNG goes to a pipe, not a file: it is only ever read back to base64 it, and
+    a file in /tmp would land world-readable (ffmpeg uses the daemon's umask, unlike
+    the PPM, which qemu writes 0600 under the unit's UMask=0077). No file, no chmod
+    race, nothing left behind holding a picture of the guest screen.
     ponytail: blocking run, but it is a sub-second local convert behind the request
     lock and only fires on an explicit vm_see."""
-    png = ppm_path.rsplit(".", 1)[0] + ".png"
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", ppm_path, png],
-                   check=True, timeout=30)
-    data = base64.b64encode(pathlib.Path(png).read_bytes()).decode()
-    return f"data:image/png;base64,{data}"
+    png = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", ppm_path,
+         "-f", "image2pipe", "-vcodec", "png", "-"],
+        check=True, timeout=30, stdout=subprocess.PIPE).stdout
+    return f"data:image/png;base64,{base64.b64encode(png).decode()}"
 
 
 class Daemon:
