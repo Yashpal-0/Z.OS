@@ -12,6 +12,13 @@ import tempfile
 import tools
 import zosd
 
+# Every test that reaches _gate writes an audit line, so without this the suite
+# appends to the real ~/.local/share/zos/audit.log — a trail the tests forge is not
+# an audit trail. Worse, the audit assertions below count lines, so a live daemon
+# appending concurrently made them flaky. Redirect once, for the whole run.
+zosd.AUDIT = pathlib.Path(tempfile.gettempdir(), "zos-test-audit.log")
+zosd.AUDIT.unlink(missing_ok=True)
+
 
 def _fake_notify(td):
     """A stand-in for notify-send that records its argv. Returns (path, logfile);
@@ -326,6 +333,12 @@ def test_handler_exception_becomes_a_tool_result():
 
 
 # ---- audit -----------------------------------------------------------------
+
+def test_the_suite_never_writes_the_real_audit_log():
+    # Guards the redirect at the top of this file. If someone drops it, the suite
+    # silently starts forging lines into the production trail; this fails instead.
+    assert zosd.AUDIT.parent != pathlib.Path.home() / ".local/share/zos"
+
 
 def test_audit_writes_one_line_per_verdict_in_both_modes():
     d = zosd.Daemon()
