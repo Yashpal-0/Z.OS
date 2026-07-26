@@ -94,7 +94,8 @@ calls distinguishable. First try, no prompt tuning.
 
 - Ubuntu GNOME, Wayland, GNOME Shell 49. Python **3.14.4**. `httpx` 0.28.1 installed —
   the only HTTP dep needed.
-- Present: `tmux`, `notify-send` (libnotify 0.8.8, `-A` action buttons), `zenity`,
+- Present: `tmux`, `notify-send` (libnotify 0.8.8 — text works; **`-A` action buttons are
+  accepted and never rendered on GNOME 49**, so prompts use `zenity --question`), `zenity`,
   `wl-copy`/`wl-paste`, `gtk-launch`, `socat`, `systemctl`, `ffmpeg`, `gdbus`, `wmctrl`,
   `qemu-system-x86_64` 10.2.1, `docker`.
 - **`ydotool` + `ydotoold` working.** `ydotoold` running, user in `input` group,
@@ -305,16 +306,43 @@ the lines disagree.
 webhook) gets **no auto-allow outside the Safe class and never auto mode** — nobody is
 watching the badge. One field, defers the whole trigger subsystem honestly.
 
-### Prompting with no window
+### Prompting
+
+> **Amended 2026-07-27, during Task 4.** This section originally specified a prompt with
+> no window, using libnotify action buttons:
+>
+> ```
+> notify-send -u critical -A allow=Allow -A deny=Deny -w "Z.OS" ...
+> ```
+>
+> **That does not work on GNOME 49.** `notify-send` accepts the actions over D-Bus, exits
+> successfully, and no button is ever rendered. Three prompts sat in process state `Sl`
+> waiting for a reply that no UI existed to send; the user confirmed seeing the
+> notifications with no buttons on them. Every guarded-mode prompt timed out, so guarded
+> mode was unanswerable. Same class of failure as the Agent SDK's `can_use_tool`: an API
+> that accepts input, reports success, and silently does not do the thing.
+>
+> The "no window" goal is abandoned, not worked around. A permission prompt that can be
+> silently dropped is worse than a window. See `plans/notes-live-host.md`.
 
 ```
-notify-send -u critical -A allow=Allow -A deny=Deny -w "Z.OS" \
-  "you said: <intent>\nwants to: <exact action>"
+zenity --question --title "Z.OS" --ok-label Allow --cancel-label Deny \
+  --timeout 60 --text "you said: <intent>\n\nwants to: <exact action>"
 ```
 
-libnotify 0.8.8 supports action buttons; `-w` blocks until clicked. The prompt shows
-**both** the user's English and the actual action — you approve the action, and the mismatch
-between the two lines is exactly when you Deny.
+zenity is already a dependency (the client uses `zenity --entry`), and a dialog is a real
+window that the compositor cannot drop. The prompt shows **both** the user's English and
+the actual action — you approve the action, and the mismatch between the two lines is
+exactly when you Deny.
+
+**Exit-code mapping is the security boundary.** Only exit 0 is an allow. zenity returns 1
+for both Deny and a closed window, 5 for its own `--timeout`, and other codes for other
+states; every one of those must block. `--timeout` is passed to zenity as well as enforced
+in `prompt_user`, so the dialog closes itself even when the daemon cannot signal it.
+
+`prompt_user` returns `"allow"`, `"deny"` or `"fail"` and **never raises**. A raise reaches
+`route()` and kills the request: the action is blocked, but no verdict is audited, making a
+denial indistinguishable from a crashed daemon. Cleanup code in particular must not raise.
 
 **Default on anything unexpected is deny:** 60s timeout, dismissed notification, daemon
 restart mid-prompt, notification daemon down. Distinguish an explicit Deny from a *failed*
