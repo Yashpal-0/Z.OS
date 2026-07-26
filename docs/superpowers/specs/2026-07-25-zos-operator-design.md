@@ -568,10 +568,16 @@ keybinding is not enough — ibus holds it separately.
 gsettings set org.gnome.desktop.wm.keybindings switch-input-source "['XF86Keyboard']"
 gsettings set org.gnome.desktop.wm.keybindings switch-input-source-backward "['<Shift>XF86Keyboard']"
 
-# ibus, the second owner. Missed by the original plan.
+# ibus, the second owner. Missed by the original plan. Clearing the key is not enough:
+# ibus grabbed <Super>space when it started, and a grab is runtime state, not
+# configuration, so it keeps the key until it is restarted. Until then the press does
+# nothing visible at all, because no input sources are configured.
 gsettings set org.freedesktop.ibus.general.hotkey triggers "[]"
+ibus restart
 
-K=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zos/
+# custom0, the name GNOME's own Settings UI uses. Any name works in principle, but
+# matching the canonical one removes a variable when this misbehaves.
+K=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/
 gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$K']"
 gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$K" name 'Z.OS'
 gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$K" command '/run/media/yash/External/Zerostic/Z.OS/zos'
@@ -590,8 +596,13 @@ Two tools lie here, and both cost time:
 - **`pgrep -f <pattern>`** matches the shell running it, so it reports processes that do
   not exist. Use `pgrep -x <comm>`.
 
-A synthetic `<Super>` press via `ydotool` does open the overview, which proves synthetic
-input reaches mutter's *internal* keybindings — but custom keybindings are grabbed by
-`gsd-media-keys` over `org.gnome.Shell.GrabAccelerators`, a different path, so that test
-says nothing about them. `org.gnome.SettingsDaemon.MediaKeys.service` sets
-`RefuseManualStart`/`RefuseManualStop`, so it cannot be restarted by hand to re-register.
+- **`ydotool` cannot test this at all.** A synthetic `<Super>` press does open the
+  overview, which proves synthetic input reaches mutter's *internal* keybindings — but
+  custom keybindings are grabbed by `gsd-media-keys` over
+  `org.gnome.Shell.GrabAccelerators`, and synthetic presses never fire them. Only a
+  physical press is evidence.
+
+`org.gnome.SettingsDaemon.MediaKeys.service` sets `RefuseManualStart`/`RefuseManualStop`,
+so it cannot be restarted by hand. It grabs accelerators at startup, so **after changing
+these settings, log out and back in** rather than expecting the new binding to register
+mid-session.
