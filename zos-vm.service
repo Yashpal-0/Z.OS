@@ -1,0 +1,24 @@
+[Unit]
+Description=Z.OS guest VM (QEMU/KVM)
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/run/media/yash/External/Zerostic/Z.OS/vm
+# QMP is total control of the guest, and qemu creates its socket with the inherited
+# umask (0775 by default). $XDG_RUNTIME_DIR is 0700 so it is unreachable anyway, but
+# one line of defence in depth is cheaper than relying on that.
+UMask=0077
+ExecStart=/usr/bin/qemu-system-x86_64 \
+  -name zos-guest \
+  -machine accel=kvm -cpu host -smp 2 -m 2048 \
+  -drive file=/run/media/yash/External/Zerostic/Z.OS/vm/zos-guest.qcow2,if=virtio,format=qcow2,node-name=zosdisk \
+  -drive file=/run/media/yash/External/Zerostic/Z.OS/vm/seed.iso,if=virtio,format=raw \
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net,netdev=n0 \
+  -vga std -display none \
+  -qmp unix:%t/zos-vm.sock,server,nowait
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
