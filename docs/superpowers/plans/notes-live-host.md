@@ -156,10 +156,46 @@ genuinely non-interactive, and `delegate` should verify the session is still ali
 and progressing rather than trusting that `tmux new-session` returning 0 means
 work is happening.
 
+## VM tier, live (Task 6 step 5)
+
+Both checks pass against the running guest.
+
+`what is on the sandbox VM screen right now?` — one `vm_see`, audited as
+`"tier": "vm"`, `"reason": "safe class"`, no prompt. The model read the frame
+correctly: an `Ubuntu 24.04.4 LTS zos-guest tty1` login prompt, which is what a
+headless cloud image shows. This was the first live exercise of the
+`__ZOS_IMAGE__` branch — the QMP PPM dump, the ffmpeg conversion and the
+multimodal `image_url` message shape had all been untested against the real API.
+
+`in the sandbox VM, create a file /tmp/from-zos containing the date, then show me
+it worked` — one `vm_shell` running `date > /tmp/from-zos && cat /tmp/from-zos`,
+again Safe with no prompt. Confirmed independently over SSH: the guest file holds
+`Sun Jul 26 20:42:07 UTC 2026`, byte-for-byte what the daemon reported.
+
+Two defects surfaced while verifying, both fixed:
+
+1. **The converted PNG was left world-readable in `/tmp`.** The PPM qemu writes is
+   0600 because the unit sets `UMask=0077`, but ffmpeg ran under the daemon's own
+   umask, so the PNG landed 0664 — a picture of the guest screen readable by any
+   local user. The file was only ever read back to base64 it, so it does not need to
+   exist: it now goes down a pipe, which removes the file, the permission mismatch
+   and the chmod race together.
+2. **The test suite wrote to the real audit log.** Every test reaching `_gate`
+   appended to `~/.local/share/zos/audit.log`. A trail the tests forge is not an
+   audit trail, and because the two audit assertions count lines, a live daemon
+   appending at the same time could break them. `AUDIT` is now redirected once for
+   the whole run, guarded by `test_the_suite_never_writes_the_real_audit_log`.
+
+One operational note, not a defect: the daemon reads `GEMINI_API_KEY`, while the
+existing key lives in `stage0/.env` as `ZEROOS_API_KEY`. Starting the daemon by
+sourcing that file alone yields `httpx.LocalProtocolError: Illegal header value
+b'Bearer '` on the first request. The plan already specifies the rename into
+`~/.config/zos/env`; Task 7 is what makes it automatic.
+
 ## Test suite
 
-31 assertions, all offline, `.venv/bin/python test_zos.py`. Three were added
-during this task, each pinning a defect above: `test_a_tool_less_reply_still_reaches_the_user`,
+41 assertions, all offline, `.venv/bin/python test_zos.py`. Three were added
+during the host run, each pinning a defect above: `test_a_tool_less_reply_still_reaches_the_user`,
 `test_prompt_timeout_returns_fail_and_never_raises`, `test_only_exit_zero_is_an_allow`.
 `test_auto_mode_narrates_the_command_it_ran` was also added, because the audit line
 proves only the verdict — the narration is a separate fire-and-forget subprocess
