@@ -489,6 +489,69 @@ def test_job_start_creates_a_real_tmux_session_and_job_kill_removes_it():
     assert name not in listing()
 
 
+# ---- VM tier ---------------------------------------------------------------
+
+def test_vm_restore_is_guarded_despite_the_prefix():
+    # Everything vm_* is Safe because the guest is disposable — except the one tool
+    # that destroys guest state the user may still want. A name-prefix rule would
+    # have swept this in.
+    import vm
+    d = zosd.Daemon()
+    if "vm_restore" not in d.handlers:
+        print("  (skipped: no VM running)", end=" ")
+        return
+    assert d._decide_fast("vm_restore", {"name": "clean"})[0] is None
+    assert "vm_restore" not in vm.SAFE
+
+
+def test_vm_tools_are_safe_when_registered():
+    d = zosd.Daemon()
+    if "vm_see" not in d.handlers:
+        print("  (skipped: no VM running)", end=" ")
+        return
+    for name in ("vm_see", "vm_type", "vm_click", "vm_shell", "vm_snapshot"):
+        assert d._decide_fast(name, {"text": "x", "command": "ls",
+                                     "x": 1, "y": 1, "name": "s"})[0] is True, name
+        assert d.tier[name] == "vm", name
+
+
+def test_the_vm_tier_never_widens_the_host_tier():
+    # Registering the VM must not make a single host tool auto-allow.
+    d = zosd.Daemon()
+    for name in ("run_shell", "type", "key", "click", "job_start", "delegate"):
+        assert d.tier[name] == "host", name
+        assert name not in d.safe, name
+
+
+def test_qmp_round_trip_against_a_live_guest():
+    import vm
+    if not vm.available():
+        print("  (skipped: no QMP socket)", end=" ")
+        return
+    out = asyncio.run(vm.HANDLERS["vm_status"]({}))
+    assert "guest is" in out, out
+
+
+def test_snapshots_address_the_node_name_not_the_device_alias():
+    # snapshot-save takes a block-graph NODE name. "virtio0" is the legacy device
+    # alias and fails with `No block device node 'virtio0'`; the auto-generated node
+    # name changes every boot, so zos-vm.service pins node-name=zosdisk.
+    import vm
+    assert vm.DISK == "zosdisk"
+    if not vm.available():
+        print("  (skipped: no QMP socket)", end=" ")
+        return
+    nodes = [d["inserted"]["node-name"]
+             for d in asyncio.run(vm.qmp("query-block"))["return"] if d.get("inserted")]
+    assert vm.DISK in nodes, nodes
+
+
+def test_vm_keys_maps_shift_and_specials():
+    import vm
+    assert vm._keys("aA") == [("a", False), ("a", True)]
+    assert vm._keys("a b") == [("a", False), ("spc", False), ("b", False)]
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_"):
