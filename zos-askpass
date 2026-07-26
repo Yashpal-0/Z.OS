@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# SUDO_ASKPASS helper. Z.OS cannot pass sudo's own gate, and should not — this hands
+# the decision back to the OS's password prompt, which is unskippable.
+exec zenity --password --title="sudo password (requested by Z.OS)"

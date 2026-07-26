@@ -1,0 +1,29 @@
+[Unit]
+Description=Z.OS headless desktop operator
+After=graphical-session.target
+PartOf=graphical-session.target
+# Must live in [Unit], not [Service]: systemd ignores unknown keys instead of failing,
+# so in [Service] this was accepted, logged once as "Unknown key ... ignoring", and did
+# nothing. A failed condition marks the unit skipped rather than failed, which is what
+# actually breaks the Restart=always loop when the external drive is not mounted.
+ConditionPathExists=/run/media/yash/External/Zerostic/Z.OS/zosd.py
+
+[Service]
+Type=simple
+WorkingDirectory=/run/media/yash/External/Zerostic/Z.OS
+ExecStart=/run/media/yash/External/Zerostic/Z.OS/.venv/bin/python /run/media/yash/External/Zerostic/Z.OS/zosd.py
+EnvironmentFile=%h/.config/zos/env
+Environment=PYTHONUNBUFFERED=1
+Environment=SUDO_ASKPASS=/run/media/yash/External/Zerostic/Z.OS/zos-askpass
+Restart=always
+RestartSec=2
+# Jobs must outlive the daemon, and by default they do not. tmux double-forks, so it
+# escapes the process tree — but cgroup membership is inherited at fork and survives
+# reparenting, so the tmux server sits in this unit's cgroup, and the default
+# KillMode=control-group kills the whole cgroup on every restart. Verified: a restart
+# left "no server running" and destroyed a running job. With Restart=always, one crash
+# would have silently taken every job with it. Only the main process may be killed.
+KillMode=process
+
+[Install]
+WantedBy=graphical-session.target
