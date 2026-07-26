@@ -9,5 +9,14 @@ else
 fi
 [ -n "$text" ] || exit 0
 
-python3 -c 'import json,sys; sys.stdout.write(json.dumps({"source":"user","text":sys.argv[1]}))' "$text" \
-  | socat - "UNIX-CONNECT:$XDG_RUNTIME_DIR/zos.sock"
+# GNOME spawns this from the hotkey and discards its stderr, so a failure here is
+# invisible: the entry box appears, the text goes nowhere, and nothing says why. Worse,
+# set -u aborts silently at "$XDG_RUNTIME_DIR" if the spawner did not export it. Default
+# the path rather than trusting the inherited environment, and report what breaks.
+SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/zos.sock"
+
+if ! python3 -c 'import json,sys; sys.stdout.write(json.dumps({"source":"user","text":sys.argv[1]}))' "$text" \
+     | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null; then
+  notify-send -u critical "Z.OS" "could not reach the daemon at $SOCK"
+  exit 1
+fi

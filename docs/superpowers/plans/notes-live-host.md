@@ -256,3 +256,41 @@ Awaiting a physical press to discriminate: binding never fires, versus binding f
 the spawned command fails. The bound command is temporarily wrapped to log to
 `/tmp/zos-hotkey.log` so one press answers it. Steps 8 and 9 both need a human at the
 keyboard anyway.
+
+### Hotkey, continued — what is actually known
+
+Resolved: **`gsd-media-keys` grabs cannot be triggered by `ydotool`.** A synthetic
+`<Super>` press does open the overview, because mutter's *internal* keybindings read the
+uinput device — but custom keybindings are grabbed through
+`org.gnome.Shell.GrabAccelerators`, and synthetic presses never fire them. Every negative
+synthetic result recorded above is therefore void, including the `<Super>F9` and
+`<Super>Return` tests. Only a physical press is evidence. This is worth remembering: it
+is the third mechanism in this project that accepts input, reports nothing wrong, and
+silently does not work — after the SDK's `can_use_tool` and notify-send's `-A` buttons.
+
+A real blocker was found and fixed on the way: **ibus held `<Super>space` as a live grab**.
+Clearing `org.freedesktop.ibus.general.hotkey triggers` does not release a grab already
+registered — a grab is runtime state, not configuration. `ibus restart` released it, and
+the next physical press opened the Z.OS box for the first time. With no input sources
+configured, ibus swallowing the key produced no visible effect at all, which is the most
+misleading symptom available.
+
+Still unresolved: the hotkey then behaved inconsistently — two physical presses opened the
+box, a later one did nothing, with the configuration provably unchanged and no other owner
+of the accelerator. The likely cause is that `gsd-media-keys` grabs accelerators at
+startup and a mid-session addition registers unreliably; it cannot be restarted by hand
+(`RefuseManualStart`/`RefuseManualStop`) to test that. A log out and back in is the
+natural next step, and it doubles as the cold-boot check Task 7 actually asks for.
+
+One press did open the box and then produce no notification. The client was ruled out:
+run under a minimal environment matching what `gsd-media-keys` passes to children
+(`env -i` with only PATH, HOME, USER, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS,
+WAYLAND_DISPLAY), it reached the daemon and notified correctly. So `$text` was empty and
+the client exited silently — most likely the dialog opened without keyboard focus, since a
+window spawned without a Wayland activation token does not necessarily get focus.
+
+That silent exit is fixed either way: the client now defaults `XDG_RUNTIME_DIR` instead of
+trusting the spawner, and reports a failure to reach the daemon with a critical
+notification rather than dying invisibly. GNOME discards the client's stderr, so this is
+the same lesson as Defect 1 one layer further out — a process launched by something else
+must make its own failure visible.
