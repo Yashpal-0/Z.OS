@@ -7,6 +7,7 @@ this daemon owns its tool loop instead of borrowing an agent framework's.
 """
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import pathlib
@@ -28,6 +29,7 @@ MODEL = os.environ.get("ZOS_MODEL", "gemini-3.6-flash")
 API_URL = os.environ.get(
     "ZOS_MODEL_URL",
     "https://generativelanguage.googleapis.com/v1beta/openai") + "/chat/completions"
+PROMPT_TIMEOUT = 60     # module-level so tests can shrink it
 MAX_STEPS = 12          # a runaway tool loop stops here
 MAX_HISTORY = 40        # trimmed message list, bounds context growth
 
@@ -97,12 +99,19 @@ async def prompt_user(intent: str, detail: str) -> str:
             NOTIFY, "-u", "critical", "-A", "allow=Allow", "-A", "deny=Deny", "-w",
             "Z.OS", f"you said: {intent}\nwants to: {detail}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=PROMPT_TIMEOUT)
         answer = out.decode(errors="replace").strip()
         return answer if answer in ("allow", "deny") else "fail"
     except Exception:
+        # This function must return one of the three strings no matter what. A raise
+        # here reaches route() and kills the whole request, which blocks the action
+        # but records nothing — indistinguishable from a crashed daemon. Cleanup in
+        # particular must not raise: proc.kill() gave EPERM during bring-up because
+        # the daemon was launched inside a sandbox that denies signals. Under systemd
+        # it would have succeeded, which is exactly why this must not be relied on.
         if proc is not None and proc.returncode is None:
-            proc.kill()
+            with contextlib.suppress(Exception):
+                proc.kill()
         return "fail"
 
 

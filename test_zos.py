@@ -147,6 +147,40 @@ def test_broken_prompt_is_fail_not_deny():
         zosd.NOTIFY = saved
 
 
+def test_prompt_timeout_returns_fail_and_never_raises():
+    # An error in the timeout cleanup path used to escape prompt_user, so "must
+    # prompt" became a dead request: nothing ran, nothing was audited, and the
+    # daemon looked crashed. prompt_user must always yield one of three strings.
+    with tempfile.TemporaryDirectory() as td:
+        hang = pathlib.Path(td, "hang")
+        hang.write_text('#!/bin/sh\ntrap "" TERM\nsleep 30\n')
+        hang.chmod(0o755)
+        zosd.NOTIFY, saved = str(hang), zosd.PROMPT_TIMEOUT
+        zosd.PROMPT_TIMEOUT = 1
+        try:
+            assert asyncio.run(zosd.prompt_user("an intent", "a detail")) == "fail"
+        finally:
+            zosd.NOTIFY, zosd.PROMPT_TIMEOUT = "notify-send", saved
+
+
+def test_a_timed_out_prompt_is_audited_as_a_denial():
+    # The verdict must reach the log even when no human ever answered.
+    with tempfile.TemporaryDirectory() as td:
+        hang = pathlib.Path(td, "hang")
+        hang.write_text('#!/bin/sh\ntrap "" TERM\nsleep 30\n')
+        hang.chmod(0o755)
+        zosd.NOTIFY, saved = str(hang), zosd.PROMPT_TIMEOUT
+        zosd.PROMPT_TIMEOUT = 1
+        before = zosd.AUDIT.read_text().count("\n") if zosd.AUDIT.exists() else 0
+        try:
+            allow, why = asyncio.run(
+                zosd.Daemon()._gate("run_shell", {"command": "rm -rf /"}))
+        finally:
+            zosd.NOTIFY, zosd.PROMPT_TIMEOUT = "notify-send", saved
+    assert allow is False and why == "prompt failed", (allow, why)
+    assert zosd.AUDIT.read_text().count("\n") == before + 1
+
+
 def test_gate_blocks_when_the_prompt_fails():
     saved = zosd.NOTIFY
     zosd.NOTIFY = "zos-no-such-binary"
