@@ -139,12 +139,30 @@ def test_mode_command_never_reaches_the_model():
 def test_broken_prompt_is_fail_not_deny():
     # "fail" must be distinguishable from "deny": a broken prompt is not a user
     # decision, and only an explicit Deny should read as one.
-    saved = zosd.NOTIFY
-    zosd.NOTIFY = "zos-no-such-binary"
+    saved = zosd.PROMPT
+    zosd.PROMPT = "zos-no-such-binary"
     try:
         assert asyncio.run(zosd.prompt_user("do a thing", "rm -rf /")) == "fail"
     finally:
-        zosd.NOTIFY = saved
+        zosd.PROMPT = saved
+
+
+def test_only_exit_zero_is_an_allow():
+    # The whole permission model rests on this mapping. zenity exits 1 for Deny AND
+    # for a closed window, 5 for its own --timeout, and anything else is an unknown
+    # state — so every code except 0 must block.
+    expected = {0: "allow", 1: "deny", 5: "fail", 2: "fail", 127: "fail", 255: "fail"}
+    with tempfile.TemporaryDirectory() as td:
+        for rc, want in expected.items():
+            stub = pathlib.Path(td, f"exit{rc}")
+            stub.write_text(f"#!/bin/sh\nexit {rc}\n")
+            stub.chmod(0o755)
+            saved, zosd.PROMPT = zosd.PROMPT, str(stub)
+            try:
+                got = asyncio.run(zosd.prompt_user("an intent", "a detail"))
+            finally:
+                zosd.PROMPT = saved
+            assert got == want, (rc, got, want)
 
 
 def test_prompt_timeout_returns_fail_and_never_raises():
@@ -155,12 +173,12 @@ def test_prompt_timeout_returns_fail_and_never_raises():
         hang = pathlib.Path(td, "hang")
         hang.write_text('#!/bin/sh\ntrap "" TERM\nsleep 30\n')
         hang.chmod(0o755)
-        zosd.NOTIFY, saved = str(hang), zosd.PROMPT_TIMEOUT
+        zosd.PROMPT, saved = str(hang), zosd.PROMPT_TIMEOUT
         zosd.PROMPT_TIMEOUT = 1
         try:
             assert asyncio.run(zosd.prompt_user("an intent", "a detail")) == "fail"
         finally:
-            zosd.NOTIFY, zosd.PROMPT_TIMEOUT = "notify-send", saved
+            zosd.PROMPT, zosd.PROMPT_TIMEOUT = "zenity", saved
 
 
 def test_a_timed_out_prompt_is_audited_as_a_denial():
@@ -169,26 +187,26 @@ def test_a_timed_out_prompt_is_audited_as_a_denial():
         hang = pathlib.Path(td, "hang")
         hang.write_text('#!/bin/sh\ntrap "" TERM\nsleep 30\n')
         hang.chmod(0o755)
-        zosd.NOTIFY, saved = str(hang), zosd.PROMPT_TIMEOUT
+        zosd.PROMPT, saved = str(hang), zosd.PROMPT_TIMEOUT
         zosd.PROMPT_TIMEOUT = 1
         before = zosd.AUDIT.read_text().count("\n") if zosd.AUDIT.exists() else 0
         try:
             allow, why = asyncio.run(
                 zosd.Daemon()._gate("run_shell", {"command": "rm -rf /"}))
         finally:
-            zosd.NOTIFY, zosd.PROMPT_TIMEOUT = "notify-send", saved
+            zosd.PROMPT, zosd.PROMPT_TIMEOUT = "zenity", saved
     assert allow is False and why == "prompt failed", (allow, why)
     assert zosd.AUDIT.read_text().count("\n") == before + 1
 
 
 def test_gate_blocks_when_the_prompt_fails():
-    saved = zosd.NOTIFY
-    zosd.NOTIFY = "zos-no-such-binary"
+    saved = zosd.PROMPT
+    zosd.PROMPT = "zos-no-such-binary"
     try:
         allow, why = asyncio.run(
             zosd.Daemon()._gate("run_shell", {"command": "rm -rf /"}))
     finally:
-        zosd.NOTIFY = saved
+        zosd.PROMPT = saved
     assert allow is False and why == "prompt failed", (allow, why)
 
 
@@ -256,7 +274,7 @@ def test_blocked_tool_never_executes_and_the_model_is_told():
         return "should not happen"
 
     d.handlers["run_shell"] = fake_shell
-    saved, zosd.NOTIFY = zosd.NOTIFY, "zos-no-such-binary"
+    saved, zosd.PROMPT = zosd.PROMPT, "zos-no-such-binary"
     captured = {}
 
     async def fake(http, messages):
@@ -269,7 +287,7 @@ def test_blocked_tool_never_executes_and_the_model_is_told():
     try:
         asyncio.run(d.route("delete everything"))
     finally:
-        zosd.NOTIFY = saved
+        zosd.PROMPT = saved
     assert ran == [], "a blocked command must not run"
     assert "blocked by Z.OS gate" in captured["tool_result"], captured
 

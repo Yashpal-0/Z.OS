@@ -24,6 +24,11 @@ import tools
 SOCK = pathlib.Path(os.environ["XDG_RUNTIME_DIR"]) / "zos.sock"
 AUDIT = pathlib.Path.home() / ".local/share/zos/audit.log"
 NOTIFY = "notify-send"
+# Prompts are a dialog, not a notification. GNOME 49 accepts notify-send's -A action
+# buttons over D-Bus, reports success, and never renders them — so an action-based
+# prompt can never be answered. Verified on this desktop 2026-07-27: three prompts
+# sat in state Sl waiting for a reply that no UI existed to send.
+PROMPT = "zenity"
 
 MODEL = os.environ.get("ZOS_MODEL", "gemini-3.6-flash")
 API_URL = os.environ.get(
@@ -90,18 +95,23 @@ def audit(**fields) -> None:
 
 
 async def prompt_user(intent: str, detail: str) -> str:
-    """Blocking allow/deny prompt with no window. Returns "allow", "deny" (the user
-    chose Deny) or "fail" (anything else). Only "allow" permits the call: the failure
-    mode of the prompt system must be 'nothing happens', never 'it ran'."""
+    """Blocking allow/deny dialog. Returns "allow", "deny" or "fail", and never raises.
+
+    Only exit 0 permits the call. zenity returns 1 for both Deny and a closed window,
+    and 5 for its own --timeout; every other code is an unknown state. The failure mode
+    of the prompt system must be 'nothing happens', never 'it ran', so anything that is
+    not an explicit Allow blocks. --timeout is passed to zenity as well as enforced
+    here, so the dialog closes itself even if we cannot signal it."""
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            NOTIFY, "-u", "critical", "-A", "allow=Allow", "-A", "deny=Deny", "-w",
-            "Z.OS", f"you said: {intent}\nwants to: {detail}",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=PROMPT_TIMEOUT)
-        answer = out.decode(errors="replace").strip()
-        return answer if answer in ("allow", "deny") else "fail"
+            PROMPT, "--question", "--title", "Z.OS",
+            "--text", f"you said: {intent}\n\nwants to: {detail}",
+            "--ok-label", "Allow", "--cancel-label", "Deny",
+            "--timeout", str(PROMPT_TIMEOUT),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        rc = await asyncio.wait_for(proc.wait(), timeout=PROMPT_TIMEOUT + 2)
+        return {0: "allow", 1: "deny"}.get(rc, "fail")
     except Exception:
         # This function must return one of the three strings no matter what. A raise
         # here reaches route() and kills the whole request, which blocks the action
