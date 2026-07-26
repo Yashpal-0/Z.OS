@@ -6,9 +6,20 @@ loop and gate are testable offline and for free.
 """
 import asyncio
 import json
+import pathlib
+import tempfile
 
 import tools
 import zosd
+
+
+def _fake_notify(td):
+    """A stand-in for notify-send that records its argv. Returns (path, logfile);
+    the gate fires notifications without awaiting them, so the caller must settle."""
+    fake = pathlib.Path(td, "fake-notify")
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$0.log"\n')
+    fake.chmod(0o755)
+    return str(fake), pathlib.Path(str(fake) + ".log")
 
 
 # ---- shell judgement -------------------------------------------------------
@@ -275,6 +286,58 @@ def test_audit_writes_one_line_per_verdict_in_both_modes():
     last = json.loads(zosd.AUDIT.read_text().splitlines()[-1])
     for field in ("ts", "tool", "tier", "verdict", "reason", "mode", "source"):
         assert field in last, field
+
+
+# ---- the user always finds out ---------------------------------------------
+
+def test_auto_mode_narrates_the_command_it_ran():
+    # The audit line proves only the verdict. In sticky auto this notification is
+    # the sole real-time signal a host action happened, and it is a separate code
+    # path (fire-and-forget subprocess), so it needs its own check.
+    d = zosd.Daemon()
+    d.auto, d.current_source = True, "user"
+
+    async def gate_and_settle():
+        await d._gate("run_shell", {"command": "touch /tmp/zos-narration-check"})
+        await asyncio.sleep(0.3)          # not awaited by _gate; let it land
+
+    with tempfile.TemporaryDirectory() as td:
+        zosd.NOTIFY, log = _fake_notify(td)
+        try:
+            asyncio.run(gate_and_settle())
+            line = log.read_text()
+        finally:
+            zosd.NOTIFY = "notify-send"
+    assert "Z.OS (auto)" in line, line
+    assert "touch /tmp/zos-narration-check" in line, line
+
+
+def test_a_tool_less_reply_still_reaches_the_user():
+    # route() returning plain text used to be a silent no-op: handle() discarded
+    # the return value, so a model that answered without calling notify produced
+    # no notification, no audit line and no log output. Nothing at all.
+    d = zosd.Daemon()
+    _stub(d, [{"content": "nothing needed doing"}])
+
+    async def drive():
+        zosd.SOCK.unlink(missing_ok=True)
+        srv = await asyncio.start_unix_server(d.handle, path=zosd.SOCK)
+        r, w = await asyncio.open_unix_connection(zosd.SOCK)
+        w.write(json.dumps({"source": "user", "text": "do nothing"}).encode())
+        await w.drain(); w.write_eof()
+        await r.read(); w.close()
+        await asyncio.sleep(0.3)
+        srv.close()
+        zosd.SOCK.unlink(missing_ok=True)
+
+    with tempfile.TemporaryDirectory() as td:
+        zosd.NOTIFY, log = _fake_notify(td)
+        try:
+            asyncio.run(drive())
+            out = log.read_text()
+        finally:
+            zosd.NOTIFY = "notify-send"
+    assert "nothing needed doing" in out, out
 
 
 # ---- tools -----------------------------------------------------------------

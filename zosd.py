@@ -12,7 +12,9 @@ import os
 import pathlib
 import shlex
 import subprocess
+import sys
 import time
+import traceback
 
 import httpx
 
@@ -121,6 +123,7 @@ class Daemon:
         self.auto = False              # startup mode is ALWAYS guarded
         self.current_source = "user"
         self.current_intent = ""
+        self.notified = False          # did this request reach the user at all?
         self.badge_id = None
         self.lock = asyncio.Lock()
         self.history: list[dict] = []
@@ -164,6 +167,8 @@ class Daemon:
               verdict="allow" if allow else "deny", reason=why,
               mode="auto" if self.auto else "guarded",
               source=self.current_source, intent=self.current_intent)
+        if allow and name == "notify":
+            self.notified = True
         # Auto trades the veto, not the visibility: with no prompt and no expiry this
         # notification is the only real-time signal that a host action ran.
         if allow and why == "auto mode" and self.tier.get(name) == "host":
@@ -280,12 +285,25 @@ class Daemon:
             return
         async with self.lock:
             self.current_intent, self.current_source = text, source
+            self.notified = False
             try:
-                await self.route(text)
+                out = await self.route(text)
             except Exception as e:
+                # Without this the traceback is lost entirely: the audit log only
+                # records gate verdicts, so a failure before the first tool call
+                # left no trace anywhere. Cost one live debugging session.
+                traceback.print_exc()
+                sys.stderr.flush()
                 await asyncio.create_subprocess_exec(
                     NOTIFY, "-u", "critical", "Z.OS", f"failed: {e}",
                     stderr=asyncio.subprocess.DEVNULL)
+                return
+            if not self.notified and out:
+                # The model answered in text without calling notify. route()'s return
+                # value is the only place that text exists, so dropping it here is a
+                # silent no-op — the one failure mode a headless daemon cannot afford.
+                await asyncio.create_subprocess_exec(
+                    NOTIFY, "Z.OS", out[:300], stderr=asyncio.subprocess.DEVNULL)
 
     async def run(self):
         SOCK.unlink(missing_ok=True)
