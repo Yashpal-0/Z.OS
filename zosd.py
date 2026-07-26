@@ -143,6 +143,7 @@ class Daemon:
         self.current_source = "user"
         self.current_intent = ""
         self.notified = False          # did this request reach the user at all?
+        self.denied = False            # has the user already said no this request?
         self.badge_id = None
         self.lock = asyncio.Lock()
         self.history: list[dict] = []
@@ -168,6 +169,12 @@ class Daemon:
         unrecognised name falls to the final return and prompts. Never invert this."""
         if name in self.safe:
             return True, "safe class"
+        # A Deny the model can retry around is not a Deny. Observed live: one denial
+        # of `touch X` was followed by `python3 -c open(X)` and then job_start with
+        # the same command, each re-prompting. Checked after the safe class so notify
+        # stays reachable — a silent denial is worse than the retries.
+        if self.denied:
+            return False, "a denial already stands for this request"
         if name == "run_shell" and judge_shell(str(args.get("command", ""))):
             return True, "readonly allowlist"
         if self.auto and self.current_source == "user":
@@ -182,6 +189,10 @@ class Daemon:
             allow = answer == "allow"
             why = {"allow": "user allowed", "deny": "user denied",
                    "fail": "prompt failed"}[answer]
+            # Only an explicit Deny is a decision worth remembering. A failed prompt
+            # is not the user's answer, so it must not silence the rest of the turn.
+            if answer == "deny":
+                self.denied = True
         audit(tool=name, tier=self.tier.get(name, "host"), detail=detail,
               verdict="allow" if allow else "deny", reason=why,
               mode="auto" if self.auto else "guarded",
@@ -210,6 +221,7 @@ class Daemon:
         return r.json()["choices"][0]["message"]
 
     async def route(self, text: str) -> str:
+        self.denied = False            # one request, one standing decision
         msgs = [{"role": "system", "content": SYSTEM}] + self.history + \
                [{"role": "user", "content": text}]
         async with httpx.AsyncClient(timeout=120) as http:

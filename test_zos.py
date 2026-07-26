@@ -340,6 +340,70 @@ def test_audit_writes_one_line_per_verdict_in_both_modes():
         assert field in last, field
 
 
+def test_a_denial_is_terminal_for_the_rest_of_the_request():
+    # Observed live: one Deny of `touch X` was followed by `python3 -c open(X)` and
+    # then job_start carrying the same command. All three were denied, so nothing
+    # ran — but one decision became a queue of dialogs, and prompt fatigue is how a
+    # queue of dialogs eventually produces an Allow.
+    d = zosd.Daemon()
+    ran, told = [], []
+
+    async def fake_shell(a):
+        ran.append(a["command"])
+        return "ok"
+
+    async def fake_start(a):
+        ran.append(a["cmd"])
+        return "ok"
+
+    async def fake_notify(a):
+        told.append(a["text"])
+        return "notified"
+
+    d.handlers.update(run_shell=fake_shell, job_start=fake_start, notify=fake_notify)
+
+    prompts = []
+
+    async def deny(intent, detail):
+        prompts.append(detail)
+        return "deny"
+
+    _stub(d, [_call("run_shell", {"command": "touch /tmp/x"}, "c1"),
+              _call("run_shell", {"command": "python3 -c open('/tmp/x','w')"}, "c2"),
+              _call("job_start", {"name": "mk", "cmd": "touch /tmp/x"}, "c3"),
+              _call("notify", {"text": "could not do that"}, "c4"),
+              {"content": "reported"}])
+    saved, zosd.prompt_user = zosd.prompt_user, deny
+    try:
+        assert asyncio.run(d.route("create /tmp/x")) == "reported"
+    finally:
+        zosd.prompt_user = saved
+
+    assert ran == [], f"nothing may run after a denial: {ran}"
+    assert len(prompts) == 1, f"the user must be asked once, not per retry: {prompts}"
+    assert told == ["could not do that"], f"notify must stay reachable: {told}"
+
+
+def test_a_failed_prompt_does_not_silence_the_rest_of_the_turn():
+    # A broken prompt is not the user's decision, so it must not stand as one.
+    d = zosd.Daemon()
+    saved, zosd.PROMPT = zosd.PROMPT, "zos-no-such-binary"
+    try:
+        allow, why = asyncio.run(d._gate("run_shell", {"command": "rm -rf /"}))
+    finally:
+        zosd.PROMPT = saved
+    assert (allow, why) == (False, "prompt failed"), (allow, why)
+    assert d.denied is False
+
+
+def test_a_standing_denial_does_not_leak_into_the_next_request():
+    d = zosd.Daemon()
+    d.denied = True
+    _stub(d, [{"content": "fresh"}])
+    asyncio.run(d.route("a new request"))
+    assert d.denied is False
+
+
 # ---- the user always finds out ---------------------------------------------
 
 def test_auto_mode_narrates_the_command_it_ran():
