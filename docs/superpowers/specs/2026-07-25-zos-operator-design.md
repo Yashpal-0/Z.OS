@@ -519,3 +519,79 @@ passthrough · multiple concurrent VMs. Voice and wake word are planned later ti
    round-trip.
 6. `zos.service` + `zos-askpass` + `Super+Space` via `gsettings`; restart invariants.
 7. `delegate` against a real worker CLI on a real task.
+
+## Install
+
+Everything needed to rebuild this machine. Commands are what was actually run, not
+what was first planned — the differences are noted. **No key value appears here.**
+
+### 1. Credentials, outside the repo
+
+```bash
+mkdir -p ~/.config/zos
+umask 077
+grep -m1 '^ZEROOS_API_KEY=' \
+  /run/media/yash/External/Zerostic/ZeroOS/stage0/.env \
+  | sed 's/^ZEROOS_API_KEY=/GEMINI_API_KEY=/' > ~/.config/zos/env
+chmod 600 ~/.config/zos/env
+wc -c < ~/.config/zos/env      # sanity check only — never cat this file
+```
+
+The daemon reads `GEMINI_API_KEY`; the existing key is stored under a different name,
+hence the rename. Sourcing `stage0/.env` directly is not enough — the daemon starts
+fine and then fails on the first request with
+`httpx.LocalProtocolError: Illegal header value b'Bearer '`.
+
+It lives in `~/.config/zos/`, not the repo, so no `.gitignore` mistake can commit it.
+
+### 2. The unit
+
+```bash
+ln -sf /run/media/yash/External/Zerostic/Z.OS/zos.service ~/.config/systemd/user/zos.service
+systemctl --user daemon-reload
+systemctl --user enable --now zos.service
+systemctl --user status zos.service --no-pager | head -5
+```
+
+To stop a manually-started daemon first, resolve the PID and `kill` it. Do **not** use
+`pkill -f 'python.*zosd.py'`: the pattern matches the command line of the shell running
+it, so the invoking shell dies instead (exit 144). This bites every time.
+
+### 3. Super+Space
+
+`<Super>space` has **two** owners on this desktop, not one. Freeing only the GNOME
+keybinding is not enough — ibus holds it separately.
+
+```bash
+# GNOME's input-source switcher. The plan set both to [], but only <Super>space needs
+# freeing, so XF86Keyboard is kept and the dedicated key still switches sources.
+gsettings set org.gnome.desktop.wm.keybindings switch-input-source "['XF86Keyboard']"
+gsettings set org.gnome.desktop.wm.keybindings switch-input-source-backward "['<Shift>XF86Keyboard']"
+
+# ibus, the second owner. Missed by the original plan.
+gsettings set org.freedesktop.ibus.general.hotkey triggers "[]"
+
+K=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zos/
+gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$K']"
+gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$K" name 'Z.OS'
+gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$K" command '/run/media/yash/External/Zerostic/Z.OS/zos'
+gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$K" binding '<Super>space'
+```
+
+This machine has no input sources configured (`org.gnome.desktop.input-sources sources`
+is empty), so neither switcher was doing anything useful before being freed.
+
+### 4. Diagnosing the keybinding
+
+Two tools lie here, and both cost time:
+
+- **`dconf read` and `dconf dump` return empty for keys that are definitely set.** Trust
+  `gsettings get` in a *fresh process* instead; same-invocation reads prove nothing.
+- **`pgrep -f <pattern>`** matches the shell running it, so it reports processes that do
+  not exist. Use `pgrep -x <comm>`.
+
+A synthetic `<Super>` press via `ydotool` does open the overview, which proves synthetic
+input reaches mutter's *internal* keybindings — but custom keybindings are grabbed by
+`gsd-media-keys` over `org.gnome.Shell.GrabAccelerators`, a different path, so that test
+says nothing about them. `org.gnome.SettingsDaemon.MediaKeys.service` sets
+`RefuseManualStart`/`RefuseManualStop`, so it cannot be restarted by hand to re-register.

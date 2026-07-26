@@ -200,3 +200,59 @@ during the host run, each pinning a defect above: `test_a_tool_less_reply_still_
 `test_auto_mode_narrates_the_command_it_ran` was also added, because the audit line
 proves only the verdict — the narration is a separate fire-and-forget subprocess
 and needed its own check rather than a question to the user.
+
+## Task 7 — unit, askpass, hotkey
+
+The unit works: `active (running)`, the key arrives via `EnvironmentFile=`, and a live
+request routed and notified. `graphical-session.target` is active and pulled by
+`gnome-session.target`, so login autostart will work. Two defects in the planned unit,
+both fixed and both verified empirically rather than by reading:
+
+1. **`ConditionPathExists` was in `[Service]`, where systemd ignores it.** The journal
+   said `Unknown key 'ConditionPathExists' in section [Service], ignoring` once at start
+   and the unit ran happily without the guard it was supposed to have. Moved to `[Unit]`.
+   Proven with a drop-in pointing at a missing path: the unit is now
+   `skipped, unmet condition check` and goes **inactive, not failed**, which is what
+   actually stops the `Restart=always` loop when the external drive is not mounted.
+2. **Jobs did not survive a restart.** `tmux ls` returned `no server running` and a
+   running job was destroyed. The plan assumed "tmux and QEMU own their own lifetimes";
+   that holds for QEMU, which has its own unit, but not for tmux. tmux double-forks and
+   so escapes the *process tree*, but cgroup membership is inherited at `fork()` and is
+   unaffected by reparenting — systemd's own listing showed the tmux server inside
+   `zos.service`'s cgroup, where the default `KillMode=control-group` killed it. Fixed
+   with `KillMode=process`; verified the job now survives a restart and keeps ticking.
+
+Restart invariants hold. After `./zos "auto"` and a restart, the next request audited as
+`"mode": "guarded"` with `"reason": "user allowed"` — a prompt appeared, so auto did not
+survive. Had it survived, the reason would read `"auto mode"`.
+
+### A consequence worth a decision
+
+`Restart=always` plus "startup mode is ALWAYS guarded" means an unnoticed crash now
+silently flips auto back to guarded mid-session. Before this task a restart was always
+deliberate. That is in tension with the standing "auto sticky until I say guarded", so
+it is recorded here rather than changed — narrowing either rule is the user's call, not
+something to quietly pick.
+
+### Hotkey: unresolved
+
+The gsettings configuration is correct and persists across processes, GNOME Shell 50.1
+on Wayland, `gsd-media-keys` running — but a synthetic `<Super>space` (and `<Super>F9`,
+to rule out a conflict) does not launch the client.
+
+Two owners of `<Super>space` were found and freed, one of which the plan missed entirely:
+GNOME's `switch-input-source` **and** `org.freedesktop.ibus.general.hotkey triggers`.
+Freeing both did not make it fire, so the ibus grab was a real defect in the install
+steps but not the cause here.
+
+What is proven: a synthetic `<Super>` press *does* open the overview
+(`OverviewActive` false→true), so synthetic input reaches mutter's internal keybindings.
+That says nothing about custom keybindings, which `gsd-media-keys` grabs over
+`org.gnome.Shell.GrabAccelerators` — a different registration path, and the one still
+untested. `org.gnome.SettingsDaemon.MediaKeys.service` refuses manual start/stop, so it
+cannot be restarted by hand to re-register.
+
+Awaiting a physical press to discriminate: binding never fires, versus binding fires and
+the spawned command fails. The bound command is temporarily wrapped to log to
+`/tmp/zos-hotkey.log` so one press answers it. Steps 8 and 9 both need a human at the
+keyboard anyway.
