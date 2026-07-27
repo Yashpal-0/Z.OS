@@ -23,6 +23,14 @@ import zosd
 zosd.AUDIT = pathlib.Path(tempfile.gettempdir(), "zos-test-audit.log")
 zosd.AUDIT.unlink(missing_ok=True)
 
+# SOCK needs the same treatment, and for a sharper reason. Two tests below bind a real
+# server at zosd.SOCK and unlink it afterwards. Against the default path that is the *live*
+# daemon's socket: the unlink leaves the running daemon holding a listening inode that no
+# filename reaches any more, so it stays up, keeps logging its hotkey, and answers nothing.
+# Every client then dies on a broken pipe with no line in any log to say why. Running the
+# offline suite must not be able to take down the daemon it is testing.
+zosd.SOCK = pathlib.Path(tempfile.mkdtemp(prefix="zos-test-"), "zos.sock")
+
 
 def _fake_notify(td):
     """A stand-in for notify-send that records its argv. Returns (path, logfile);
@@ -708,6 +716,13 @@ def test_job_send_is_never_safe_but_job_read_is():
 def test_job_send_prompt_shows_what_will_be_typed():
     shown = tools.render("job_send", {"name": "zos-w-codex", "text": "y", "keys": "Enter"})
     assert "zos-w-codex" in shown and "y" in shown and "Enter" in shown, shown
+
+
+def test_the_suite_never_touches_the_live_daemons_socket():
+    """Guards the redirect at the top of this file. Without it the suite unlinks the
+    running daemon's socket and the daemon goes silently deaf — it stays up and logs
+    nothing, so the damage surfaces only as a broken pipe in some later client."""
+    assert zosd.SOCK != pathlib.Path(os.environ["XDG_RUNTIME_DIR"]) / "zos.sock"
 
 
 def _fake_tmux(td, script):

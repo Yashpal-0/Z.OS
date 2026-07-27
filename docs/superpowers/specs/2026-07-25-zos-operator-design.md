@@ -541,6 +541,20 @@ The runner block must stay at the **very bottom** of `test_zos.py`. It collects 
 and simply never executed, while the suite reported that everything passed. Anything that
 reports success without running is worse than no suite at all.
 
+**The suite redirects every path it can write to `zosd`'s module globals — `AUDIT` and
+`SOCK` — once, at import.** Both had to be learned the hard way. `AUDIT` because tests that
+reach `_gate` would otherwise forge lines into the real audit trail. `SOCK` because two
+tests bind a real server at `zosd.SOCK` and unlink it afterwards: run against the default
+path, that is the *live* daemon's socket, and the unlink leaves the running daemon holding a
+listening inode no filename reaches. The daemon stays up, keeps logging hotkey presses, and
+answers nothing. Every client after that dies on a broken pipe with no line in any log
+saying why — it went unnoticed until a routine `./zos "notify ..."` failed hours later.
+A test asserts the redirect is still in place, because the failure it prevents is invisible.
+
+The general rule, third time it has come up in this project: **a test that can reach
+production state will eventually break production silently.** Redirect at import, not
+per-test — a per-test contextmanager only protects the tests someone remembered to wrap.
+
 `hotkey_check.py` is separate and manual: it needs `/dev/uinput` and the `input` group, so
 it cannot live in an offline suite. Run it after touching the listener.
 
