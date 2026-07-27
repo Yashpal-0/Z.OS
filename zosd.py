@@ -8,6 +8,7 @@ this daemon owns its tool loop instead of borrowing an agent framework's.
 import asyncio
 import base64
 import contextlib
+import fcntl
 import glob
 import json
 import os
@@ -201,18 +202,29 @@ def _keyboards() -> list[str]:
 
 
 def _client_open() -> bool:
-    """True if a zos client is already running — meaning GNOME's keybinding got there first
-    and this listener must stand down. Scans /proc rather than shelling out to `pgrep -f`,
-    whose pattern also matches the command line of the shell running it; that trap has cost
-    this project three restarts."""
-    for proc in pathlib.Path("/proc").iterdir():
-        if not proc.name.isdigit():
-            continue
-        try:
-            if CLIENT in (proc / "cmdline").read_bytes().decode(errors="replace"):
-                return True
-        except OSError:
-            continue                    # exited mid-scan
+    """True if a zos client already has its box up — meaning GNOME's keybinding got there
+    first and this listener must stand down.
+
+    Asks the lock the client holds, not the process table. Identifying it by process was
+    wrong twice: `pgrep -f` matches the shell running it, and scanning /proc cmdlines for
+    the path matches any shell that merely *names* it (`rm /path/zos`), which silently
+    stands the hotkey down for as long as that command runs. Matching argv[0] instead is
+    wrong too — the client is a script, so argv[0] is the interpreter.
+
+    Taking the lock here rather than only testing it is safe: if a client is starting at
+    this exact instant it loses the race and exits, and this function then reports no
+    client, so its caller starts one. Either way exactly one box opens."""
+    lock = SOCK.with_name("zos-client.lock")
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        return False                    # cannot tell; better to open a box than to swallow
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True                     # a client holds it
+    finally:
+        os.close(fd)                    # closing releases whatever we took
     return False
 
 

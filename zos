@@ -5,6 +5,16 @@ set -euo pipefail
 if [ "$#" -gt 0 ]; then
   text="$*"
 else
+  # Super+Space has two owners (GNOME's binding and the daemon's own listener), so this
+  # can be launched twice for one press. Hold a lock for as long as the box is up and let
+  # the second one lose: the daemon tests this same lock before firing. The lock is on the
+  # fd, not the file, so it is released even if this is killed and a stale file is
+  # meaningless. Detecting the client by scanning /proc instead was wrong three times over
+  # — a shell merely naming the path counted as a client, and argv[0] is the interpreter
+  # for a script, not the script.
+  LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/zos-client.lock"
+  exec 9>"$LOCK"
+  flock -n 9 || exit 0
   text="$(zenity --entry --title="Z.OS" --text="" 2>/dev/null || true)"
 fi
 [ -n "$text" ] || exit 0

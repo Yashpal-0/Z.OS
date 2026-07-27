@@ -536,6 +536,14 @@ the host tier must keep working.
 
 ## Testing (one file, assert-based, no framework)
 
+The runner block must stay at the **very bottom** of `test_zos.py`. It collects tests from
+`globals()`, which is evaluated where the block runs — so for a while 14 tests sat below it
+and simply never executed, while the suite reported that everything passed. Anything that
+reports success without running is worse than no suite at all.
+
+`hotkey_check.py` is separate and manual: it needs `/dev/uinput` and the `input` group, so
+it cannot live in an offline suite. Run it after touching the listener.
+
 - metacharacter check rejects `ls; rm -rf ~`, `cat x > y`, `ls $(whoami)`
 - allowlist accepts `git status --short`, rejects `git push`
 - gate fails closed on an unrecognised tool name
@@ -653,7 +661,9 @@ Two tools lie here, and both cost time:
 - **`dconf read` and `dconf dump` return empty for keys that are definitely set.** Trust
   `gsettings get` in a *fresh process* instead; same-invocation reads prove nothing.
 - **`pgrep -f <pattern>`** matches the shell running it, so it reports processes that do
-  not exist. Use `pgrep -x <comm>`.
+  not exist. Use `pgrep -x <comm>`. Note this is not only a shell-hygiene problem: the same
+  trap reappeared *inside the daemon* as a `/proc` cmdline scan (§5). Identify a process by
+  something it holds, not by text that happens to appear on a command line.
 
 - **`ydotool` cannot test this at all.** A synthetic `<Super>` press does open the
   overview, which proves synthetic input reaches mutter's *internal* keybindings — but
@@ -687,12 +697,41 @@ unit tests for exactly this — including one asserting the listener remembers n
 the modifier — because "it does not log keystrokes" has to be checkable, not trusted.
 
 Both paths run the same client, so a duplicate would open two dialogs. A short grace period
-lets the GNOME binding win when it works, and the daemon checks whether a client is already
-open (by scanning `/proc`, not `pgrep -f`, which matches its own invocation) before firing.
+lets the GNOME binding win when it works, and before firing the daemon checks whether a
+client is already up.
 
-**Status: the listener starts and logs its device count; the fire-and-dedup path is designed
-but not yet observed.** It needs a physical Super+Space — synthetic input is not evidence
-here for the same reason it is not evidence for the GNOME binding. `_fire_hotkey` logs on
-both branches specifically so that press is conclusive: one dialog plus
-`client already open, standing down` means both owners work and dedup works, whereas one
-dialog with no `meta+space detected` line at all means only GNOME fired.
+**That check is a lock the client holds, not a process search** — `flock` on
+`$XDG_RUNTIME_DIR/zos-client.lock`, taken by the client for as long as its box is open. The
+process-based versions were wrong three times over, each silently:
+
+| Attempt | Why it fails |
+|---|---|
+| `pgrep -f <path>` | matches the command line of the shell running it |
+| scan `/proc` cmdlines for the path | matches any shell that merely *names* it (`rm /path/zos`), so the hotkey stands down for as long as that command runs |
+| match `argv[0]` | the client is a script, so `argv[0]` is the interpreter, not the client |
+
+The daemon *takes* the lock to test it rather than only querying it. That is safe: if a
+client is starting at that instant it loses the race and exits, and the daemon — having got
+the lock — then sees no client and starts one. Either way exactly one box opens.
+
+**Status.** Everything from the file descriptor down is **verified against real kernel
+events** by `hotkey_check.py`, which creates a uinput virtual keyboard, points
+`_keyboards()` at its evdev node and runs the real `Daemon.watch_hotkey`. Observed: one
+client on Meta+Space, *no* second client while the first is still up (the dedup branch),
+nothing at all on Space without Meta, and a client again once the first exits.
+
+That harness is also what found the `/proc` scan bug above — its own invoking shell named
+the fake client in an `rm`, and the listener dutifully stood down. Worth stating plainly:
+the offline suite had passed throughout, because it had never run this wiring at all.
+
+**Two things remain unproven, and no synthetic test can prove them:**
+
+- that `_keyboards()` finds the *physical* keyboard — which is why the uinput device has to
+  be injected past the glob rather than through it;
+- that GNOME's `<Super>space` binding fires at all, for the reason in §4.
+
+Both need one physical press after a re-login. `_fire_hotkey` logs on both branches so that
+press is conclusive: `meta+space detected` + `client already open, standing down` means both
+owners work; `meta+space detected` + `opening the client` means the listener works and
+GNOME's binding does not; no `meta+space detected` line means only GNOME fired and the glob
+is not finding the keyboard.

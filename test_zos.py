@@ -5,10 +5,13 @@ No API calls: route() is exercised with a stubbed _call_model, so the whole rout
 loop and gate are testable offline and for free.
 """
 import asyncio
+import contextlib
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
+import time
 
 import tools
 import zosd
@@ -566,14 +569,6 @@ def test_vm_keys_maps_shift_and_specials():
     assert vm._keys("a b") == [("a", False), ("spc", False), ("b", False)]
 
 
-if __name__ == "__main__":
-    for _name, _fn in sorted(globals().items()):
-        if _name.startswith("test_"):
-            _fn()
-            print("ok", _name)
-    print("all passed")
-
-
 # ---- hotkey ----------------------------------------------------------------
 
 def test_input_event_struct_matches_the_kernel_layout():
@@ -614,6 +609,49 @@ def test_non_key_events_are_ignored():
     h = zosd.Hotkey()
     h.feed(zosd.EV_KEY, 125, 1)
     assert h.feed(0x03, zosd.KEY_SPACE, 1) is False      # EV_ABS, not a keypress
+
+
+@contextlib.contextmanager
+def _lock_dir():
+    """Point the client lock at a scratch directory, so the suite never contends with a
+    real client on the live desktop."""
+    with tempfile.TemporaryDirectory() as d:
+        real, zosd.SOCK = zosd.SOCK, pathlib.Path(d, "zos.sock")
+        try:
+            yield pathlib.Path(d, "zos-client.lock")
+        finally:
+            zosd.SOCK = real
+
+
+def test_no_client_holding_the_lock_means_none_is_open():
+    with _lock_dir():
+        assert zosd._client_open() is False
+
+
+def test_a_client_holding_the_lock_is_detected():
+    """The dedup that stops one Super+Space opening two boxes. Identifying the client by
+    process was wrong twice — `pgrep -f` matches the shell running it, and a /proc cmdline
+    scan matches any shell that merely *names* the path (`rm /path/zos`), silencing the
+    hotkey for as long as that command runs. argv[0] fails too: the client is a script, so
+    argv[0] is the interpreter. The lock is what an actually-running client holds."""
+    with _lock_dir() as lock:
+        p = subprocess.Popen(["flock", str(lock), "sleep", "3"])
+        try:
+            time.sleep(0.3)
+            assert zosd._client_open() is True
+        finally:
+            p.kill(), p.wait()
+    # and it is released when that client exits
+    with _lock_dir():
+        assert zosd._client_open() is False
+
+
+def test_testing_the_lock_does_not_keep_it():
+    """_client_open takes the lock to test it. If it did not give it straight back, the
+    first press would lock out every later one."""
+    with _lock_dir():
+        assert zosd._client_open() is False
+        assert zosd._client_open() is False
 
 
 # ---- delegation ------------------------------------------------------------
@@ -688,3 +726,13 @@ def test_job_send_still_reports_a_real_failure():
         finally:
             os.environ["PATH"] = saved
     assert "could not" in out and "no such session" in out, out
+
+
+# The runner MUST stay at the very bottom. globals() is evaluated where this block runs,
+# so anything defined below it is silently not a test — 14 tests sat below it unnoticed.
+if __name__ == "__main__":
+    _tests = sorted(k for k in globals() if k.startswith("test_"))
+    for _name in _tests:
+        globals()[_name]()
+        print("ok", _name)
+    print(f"all passed ({len(_tests)} tests)")
