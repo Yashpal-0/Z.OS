@@ -16,6 +16,13 @@ else
   # an exit before zenity is indistinguishable from "the hotkey does not work" — the exact
   # silent failure the lock exists to prevent. Only *winning* the lock and losing the race
   # may exit; a missing flock or an unopenable path falls through and shows the box.
+  # Which owner launched this is otherwise invisible: GNOME does not log custom-keybinding
+  # spawns, and the daemon's "standing down" line looks the same whether GNOME beat it or its
+  # own earlier box was still up. The parent tells them apart — python is the daemon,
+  # gsd-media-keys is GNOME. Logged before the lock so a launch that *loses* shows up too,
+  # which is the only direct evidence both owners fire. Never fatal: set -e plus a discarded
+  # stderr would turn a missing logger into a dead hotkey.
+  logger -t zos-client "launched by $PPID $(ps -o comm= -p $PPID 2>/dev/null)" 2>/dev/null || true
   LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/zos-client.lock"
   if command -v flock >/dev/null 2>&1 && { exec 9>"$LOCK"; } 2>/dev/null; then
     flock -n 9 || exit 0
