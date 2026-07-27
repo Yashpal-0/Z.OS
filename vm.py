@@ -177,8 +177,9 @@ SCHEMAS = [
     _fn("vm_status", "Check whether the sandbox VM is running.", {}, []),
     _fn("vm_see", "Capture the sandbox VM's screen and look at it. Use this to see "
                   "what is on the guest display before typing or clicking.", {}, []),
-    _fn("vm_shell", "Run a shell command inside the sandbox VM as a user with full "
-                    "sudo. Safe to experiment: the VM is disposable.",
+    _fn("vm_shell", "Run a shell command inside the sandbox VM. PREFERRED over "
+                    "run_shell for any command that does not need host-only state. "
+                    "The VM user has full sudo; the VM is disposable and snapshottable.",
         {"command": {"type": "string"}}, ["command"]),
     _fn("vm_type", "Type text on the sandbox VM's keyboard.",
         {"text": {"type": "string"}}, ["text"]),

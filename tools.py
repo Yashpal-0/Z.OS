@@ -188,8 +188,9 @@ SCHEMAS = [
     _fn("notify", "Show a desktop notification. This is the ONLY way the user sees "
                   "anything — always finish a request with it.",
         {"text": {"type": "string"}}, ["text"]),
-    _fn("run_shell", "Run one shell command on the host and return its output. For "
-                     "quick system questions and one-liners, not multi-step work.",
+    _fn("run_shell", "Run one shell command on the HOST machine and return its output. "
+                     "Use only for tasks that need host-only state (host services, host "
+                     "filesystem, host processes). Prefer vm_shell for everything else.",
         {"command": {"type": "string"}}, ["command"]),
     _fn("type", "Type text on the host keyboard, into whatever window has focus.",
         {"text": {"type": "string"}}, ["text"]),
