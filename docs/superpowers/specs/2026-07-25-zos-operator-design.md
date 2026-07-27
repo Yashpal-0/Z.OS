@@ -257,11 +257,28 @@ Two properties made this worth fixing ahead of anything else outstanding:
   messages and fails identically — Z.OS goes deaf until the daemon is restarted, with
   `model HTTP 400` as the only clue.
 
-`_trim()` drops leading `tool` messages after slicing. That is sufficient: every other role
-is valid at the head, and the tail is always whole because a batch's results are all
-appended before history is written. Pinned by
-`test_history_never_starts_on_an_orphaned_tool_result`, verified by mutation — restoring the
-blind slice fails it on the orphan assertion.
+**Dropping leading `tool` messages is not sufficient, and believing it was is the more
+useful half of this finding.** `vm_see` appends its screenshot as a `user` message directly
+after the result it belongs to, so a batch can read `assistant(a,b,c)`, `tool a`,
+`user(image)`, `tool b`, `tool c`. That image message is a *barrier*: skipping only leading
+`tool`s stops on it and leaves `b` and `c` orphaned behind it with their assistant still
+cut. Both nearby cut points failed — landing on `tool a` and landing on the image message
+each left `['b','c']`. The first fix passed its own test and the randomised sweep because
+the sweep's generator appended the image after *every* result in a step, which is not the
+shape `route()` actually builds.
+
+So `_trim()` advances the head to the first message that can legitimately *begin* a
+history: an `assistant`, or a real `user` turn. The image message is told apart from a real
+turn by content type — `route()` builds it as a list of parts, a user turn is always a
+plain string. Everything before that point is a fragment of a group whose opener is gone,
+and is dropped whole. The tail needs no such care.
+
+Closed with the instrument that opened it: the same history that returns **400** through
+the old blind slice returns **200** after `_trim`. Pinned by
+`test_history_never_starts_on_an_orphaned_tool_result` and
+`test_a_screenshot_message_does_not_shield_orphans_behind_it`, the second sweeping every
+cut point rather than one chosen offset — the original bug was a parity accident, and
+picking a single offset is exactly how it stayed hidden.
 
 Measured on the same prompt that produced the wander: **12 calls with 7 unrequested host
 commands, down to 6 calls with 1.** The blocked repeat leaves no audit line, since it never

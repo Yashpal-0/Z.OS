@@ -123,14 +123,31 @@ def _trim(msgs: list[dict]) -> list[dict]:
       later request rebuilds the same messages and fails identically. Only a daemon
       restart clears it — a silent, self-sustaining wedge rather than one bad turn.
 
-    Dropping leading `tool` messages is enough: every other role is valid at the head, and
-    the tail is always whole because a batch's results are all appended before history is
-    ever written. Reachable in ~3% of randomised realistic shapes (1-3 calls per step over
-    6-12 steps) — rare enough to survive a long time unexplained.
+    Dropping leading `tool` messages is *not* enough, which is the trap here. `vm_see`
+    appends a `user` message carrying the screenshot right after the result it belongs to
+    (see route()), so a batch can read `assistant(a,b,c)`, `tool a`, `user(image)`,
+    `tool b`, `tool c`. That image message is a barrier: skipping only leading `tool`s stops
+    on it and leaves `b` and `c` orphaned behind it, with the assistant still cut. Measured
+    both ways — cutting at `tool a` and cutting at the image message each left `['b','c']`.
+
+    So the head is advanced to the first message that can legitimately *begin* a history:
+    an `assistant` (which always opens its own group), or a real `user` turn. The image
+    message is told apart from a real turn by its content type — route() builds it as a
+    list of parts, while a user turn is always a plain string. Everything before that point
+    is a fragment of a group whose opener is gone, and is dropped whole.
+
+    The tail needs no such care: a batch's results are all appended before history is ever
+    written. Reachable in ~3% of randomised realistic shapes (1-3 calls per step over 6-12
+    steps) — rare enough to survive a long time unexplained.
     """
+    def opens_a_group(m: dict) -> bool:
+        if m.get("role") == "assistant":
+            return True
+        return m.get("role") == "user" and isinstance(m.get("content"), str)
+
     h = msgs[-MAX_HISTORY:]
     i = 0
-    while i < len(h) and h[i].get("role") == "tool":
+    while i < len(h) and not opens_a_group(h[i]):
         i += 1
     return h[i:]
 

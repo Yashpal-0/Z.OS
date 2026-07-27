@@ -567,6 +567,13 @@ def test_a_standing_denial_does_not_leak_into_the_next_request():
     asyncio.run(d.route("a new request"))
     assert d.denied is False
 
+def _orphans(kept: list[dict]) -> list[str]:
+    """tool_call_ids in `kept` with no matching call left in it — what the endpoint rejects."""
+    have = {c["id"] for m in kept if m.get("tool_calls") for c in m["tool_calls"]}
+    return [m["tool_call_id"] for m in kept
+            if m["role"] == "tool" and m["tool_call_id"] not in have]
+
+
 def test_history_never_starts_on_an_orphaned_tool_result():
     """A blind tail slice can cut between an assistant's tool_calls and their results.
 
@@ -592,12 +599,35 @@ def test_history_never_starts_on_an_orphaned_tool_result():
     assert msgs[-zosd.MAX_HISTORY:][0]["role"] == "tool", "shape no longer exercises the cut"
 
     kept = zosd._trim(msgs)
-    have = {c["id"] for m in kept if m.get("tool_calls") for c in m["tool_calls"]}
-    orphans = [m["tool_call_id"] for m in kept
-               if m["role"] == "tool" and m["tool_call_id"] not in have]
-    assert orphans == [], f"tool results with no matching call: {orphans}"
+    assert _orphans(kept) == [], f"tool results with no matching call: {_orphans(kept)}"
     assert len(kept) <= zosd.MAX_HISTORY, len(kept)
     assert kept[-1] == msgs[-1], "the newest message must survive trimming"
+
+
+def test_a_screenshot_message_does_not_shield_orphans_behind_it():
+    """vm_see appends a `user` image message right after the result it belongs to, so a
+    batch reads assistant(a,b,c), tool a, user(image), tool b, tool c.
+
+    That image message is a barrier. The first version of _trim skipped only leading `tool`
+    messages, which stops on it and leaves b and c orphaned with their assistant still cut —
+    so the fix for the plain case did nothing here. Both nearby cut points failed: landing
+    on `tool a` and landing on the image message each left ['b', 'c'].
+
+    Every cut point is swept rather than one chosen, because the original bug was a parity
+    accident and picking a single offset is how it stayed hidden the first time.
+    """
+    calls = [{"id": i, "function": {"name": "vm_see", "arguments": "{}"}}
+             for i in ("a", "b", "c")]
+    group = [{"role": "assistant", "content": "", "tool_calls": calls},
+             {"role": "tool", "tool_call_id": "a", "content": "screen captured"},
+             {"role": "user", "content": [{"type": "text", "text": "Here is the VM screen:"}]},
+             {"role": "tool", "tool_call_id": "b", "content": "ok"},
+             {"role": "tool", "tool_call_id": "c", "content": "ok"}]
+    for nfill in range(30, 45):
+        msgs = ([{"role": "user", "content": "go"}] + group
+                + [{"role": "assistant", "content": f"f{n}"} for n in range(nfill)])
+        orphans = _orphans(zosd._trim(msgs))
+        assert orphans == [], f"filler={nfill} left {orphans}"
 
 
 # ---- the user always finds out ---------------------------------------------
