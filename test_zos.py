@@ -218,6 +218,24 @@ def test_a_timed_out_prompt_is_audited_as_a_denial():
     assert zosd.AUDIT.read_text().count("\n") == before + 1
 
 
+def test_the_prompt_defaults_to_deny_so_a_stray_enter_cannot_allow():
+    """Without --default-cancel, Allow is the default button and one Enter approves. The
+    dialog takes focus, so an Enter meant for another window lands on the gate. Measured
+    against real zenity: Enter returned 0 before this flag and 1 after."""
+    with tempfile.TemporaryDirectory() as td:
+        rec = pathlib.Path(td, "argv")
+        fake = pathlib.Path(td, "fake-zenity")
+        fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {rec}\nexit 1\n')
+        fake.chmod(0o755)
+        zosd.PROMPT, saved = str(fake), zosd.PROMPT
+        try:
+            asyncio.run(zosd.prompt_user("some intent", "some detail"))
+        finally:
+            zosd.PROMPT = saved
+        argv = rec.read_text().split("\n")
+    assert "--default-cancel" in argv, argv
+
+
 def test_gate_blocks_when_the_prompt_fails():
     saved = zosd.PROMPT
     zosd.PROMPT = "zos-no-such-binary"

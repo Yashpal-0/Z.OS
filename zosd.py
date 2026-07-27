@@ -116,13 +116,20 @@ async def prompt_user(intent: str, detail: str) -> str:
     and 5 for its own --timeout; every other code is an unknown state. The failure mode
     of the prompt system must be 'nothing happens', never 'it ran', so anything that is
     not an explicit Allow blocks. --timeout is passed to zenity as well as enforced
-    here, so the dialog closes itself even if we cannot signal it."""
+    here, so the dialog closes itself even if we cannot signal it.
+
+    **--default-cancel is load-bearing.** Without it Allow is the default button, so one
+    Enter approves — and this dialog takes focus, so an Enter meant for whatever the user
+    was typing in lands here instead. Measured: Enter into the old dialog returned 0, this
+    one returns 1. It was found because a run of gate prompts got approved during a model
+    wander and the user could not say afterwards whether the approvals had been theirs. A
+    gate nobody remembers passing is not a gate."""
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             PROMPT, "--question", "--title", "Z.OS",
             "--text", f"you said: {intent}\n\nwants to: {detail}",
-            "--ok-label", "Allow", "--cancel-label", "Deny",
+            "--ok-label", "Allow", "--cancel-label", "Deny", "--default-cancel",
             "--timeout", str(PROMPT_TIMEOUT),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         rc = await asyncio.wait_for(proc.wait(), timeout=PROMPT_TIMEOUT + 2)

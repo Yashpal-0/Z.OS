@@ -369,9 +369,29 @@ watching the badge. One field, defers the whole trigger subsystem honestly.
 > silently dropped is worse than a window. See `plans/notes-live-host.md`.
 
 ```
-zenity --question --title "Z.OS" --ok-label Allow --cancel-label Deny \
+zenity --question --title "Z.OS" --ok-label Allow --cancel-label Deny --default-cancel \
   --timeout 60 --text "you said: <intent>\n\nwants to: <exact action>"
 ```
+
+> **Amended 2026-07-27.** `--default-cancel` was missing, and without it **Allow is the
+> default button, so a single Enter approves.** The dialog takes focus, so an Enter meant
+> for whatever the user was actually typing in lands on the gate instead.
+>
+> Found by asking who approved a run of prompts during the router wander above. The user
+> could not say — *"maybe, I'm not sure"* — and that answer is the finding. A gate nobody
+> remembers passing is not a gate, and memory is not evidence, so it was measured instead:
+> synthetic Enter into the old dialog returned **0** (Allow); into the fixed one it returns
+> **1** (Deny). End-to-end, a gated `touch` is now recorded `deny - user denied` and the
+> user is notified that it failed.
+>
+> This contradicted the module's own stated principle three lines above the bug — *the
+> failure mode of the prompt system must be "nothing happens", never "it ran"* — while Enter,
+> the likeliest stray keystroke there is, was wired to Allow. The lesson worth keeping:
+> stating the invariant in a docstring does not enforce it. A test asserts the flag is
+> passed.
+>
+> It compounds with the wander: a model issuing many prompts plus a user typing elsewhere
+> equals silent approvals. Fixing either alone would have left the pair dangerous.
 
 zenity is already a dependency (the client uses `zenity --entry`), and a dialog is a real
 window that the compositor cannot drop. The prompt shows **both** the user's English and
