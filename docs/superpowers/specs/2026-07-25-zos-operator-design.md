@@ -548,12 +548,20 @@ tests bind a real server at `zosd.SOCK` and unlink it afterwards: run against th
 path, that is the *live* daemon's socket, and the unlink leaves the running daemon holding a
 listening inode no filename reaches. The daemon stays up, keeps logging hotkey presses, and
 answers nothing. Every client after that dies on a broken pipe with no line in any log
-saying why — it went unnoticed until a routine `./zos "notify ..."` failed hours later.
-A test asserts the redirect is still in place, because the failure it prevents is invisible.
+saying why. A test asserts the redirect is still in place, because the failure it prevents
+is invisible.
 
-The general rule, third time it has come up in this project: **a test that can reach
-production state will eventually break production silently.** Redirect at import, not
-per-test — a per-test contextmanager only protects the tests someone remembered to wrap.
+**Why it hid is worth keeping.** Pressing the hotkey kept working perfectly while the daemon
+was already deaf, because the two paths are independent up to the moment text is submitted:
+the client shows its box, and `[ -n "$text" ] || exit 0` returns before `socat` ever runs.
+Every press that day was dismissed with Esc, so not one of them touched the socket. A dead
+socket and a healthy one are indistinguishable from the keyboard unless you actually send
+something.
+
+The general rule — and both redirects at the top of the suite, `AUDIT` and `SOCK`, are
+instances of it: **a test that can reach production state will eventually break production
+silently.** Redirect at import, not per-test; a per-test contextmanager only protects the
+tests someone remembered to wrap.
 
 `hotkey_check.py` is separate and manual: it needs `/dev/uinput` and the `input` group, so
 it cannot live in an offline suite. Run it after touching the listener.
