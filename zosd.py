@@ -39,6 +39,11 @@ API_URL = os.environ.get(
     "https://generativelanguage.googleapis.com/v1beta/openai") + "/chat/completions"
 PROMPT_TIMEOUT = 60     # module-level so tests can shrink it
 MAX_STEPS = 12          # a runaway tool loop stops here
+
+# Repeating one of these with identical arguments is how the model *watches* something
+# change — a worker's pane, the VM screen — so it is normal and must stay allowed.
+# Repeating anything else identically means it has stopped making progress.
+POLLABLE = {"job_read", "vm_see", "vm_status", "job_list"}
 MAX_HISTORY = 40        # trimmed message list, bounds context growth
 
 SYSTEM = """You are Z.OS, a headless operator on the user's Ubuntu GNOME (Wayland)
@@ -316,6 +321,7 @@ class Daemon:
         self.denied = False            # one request, one standing decision
         msgs = [{"role": "system", "content": SYSTEM}] + self.history + \
                [{"role": "user", "content": text}]
+        seen: set[tuple[str, str]] = set()     # calls already made for *this* request
         async with httpx.AsyncClient(timeout=120) as http:
             for _ in range(MAX_STEPS):
                 m = await self._call_model(http, msgs)
@@ -325,6 +331,7 @@ class Daemon:
                 if not calls:
                     self.history = msgs[1:][-MAX_HISTORY:]
                     return m.get("content") or ""
+                stop = None
                 for c in calls:
                     name = c["function"]["name"]
                     try:
@@ -332,16 +339,30 @@ class Daemon:
                     except json.JSONDecodeError:
                         result = "error: arguments were not valid JSON"
                     else:
-                        allow, why = await self._gate(name, args)
-                        if not allow:
-                            result = f"blocked by Z.OS gate: {why}"
-                        elif name not in self.handlers:
-                            result = f"error: no such tool {name!r}"
+                        sig = (name, json.dumps(args, sort_keys=True))
+                        if name not in POLLABLE and sig in seen:
+                            # Observed live: the model finished a task, re-issued an
+                            # identical vm_snapshot, and then spent every remaining step
+                            # on host commands nobody asked for — ps aux, tmux ls, a
+                            # recursive grep of Z.OS's own repo. In guarded mode that is a
+                            # run of prompts that trains the user to click Allow; in auto
+                            # mode it all runs unattended. An identical repeat is the point
+                            # where it stopped making progress, so stop there.
+                            result = ("stopped by Z.OS: identical to an earlier call in "
+                                      "this request")
+                            stop = f"stopped: {name} repeated with the same arguments"
                         else:
-                            try:
-                                result = await self.handlers[name](args)
-                            except Exception as e:
-                                result = f"error: {type(e).__name__}: {e}"
+                            seen.add(sig)
+                            allow, why = await self._gate(name, args)
+                            if not allow:
+                                result = f"blocked by Z.OS gate: {why}"
+                            elif name not in self.handlers:
+                                result = f"error: no such tool {name!r}"
+                            else:
+                                try:
+                                    result = await self.handlers[name](args)
+                                except Exception as e:
+                                    result = f"error: {type(e).__name__}: {e}"
                     if isinstance(result, str) and result.startswith("__ZOS_IMAGE__"):
                         msgs.append({"role": "tool", "tool_call_id": c["id"],
                                      "content": "screen captured; see next message"})
@@ -352,6 +373,13 @@ class Daemon:
                     else:
                         msgs.append({"role": "tool", "tool_call_id": c["id"],
                                      "content": str(result)})
+                if stop:
+                    # Only after the whole batch, never mid-loop: returning early would
+                    # leave an assistant message carrying tool_calls with no matching tool
+                    # results, and that malformed pair goes into self.history and poisons
+                    # the *next* request.
+                    self.history = msgs[1:][-MAX_HISTORY:]
+                    return stop
             self.history = msgs[1:][-MAX_HISTORY:]
             return f"gave up after {MAX_STEPS} steps"
 

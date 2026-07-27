@@ -277,11 +277,86 @@ def test_router_caps_runaway_loops():
         return "ok"
 
     d.handlers["run_shell"] = fake_shell
-    _stub(d, [_call("run_shell", {"command": "echo loop"}, f"c{i}")
+    # Each command must differ, or the repeat guard below stops the loop long before the
+    # cap and this stops testing the cap at all.
+    _stub(d, [_call("run_shell", {"command": f"echo loop {i}"}, f"c{i}")
               for i in range(zosd.MAX_STEPS + 5)])
     out = asyncio.run(d.route("loop forever"))
     assert "gave up" in out, out
     assert len(calls) == zosd.MAX_STEPS, len(calls)
+
+
+def test_router_stops_when_a_call_repeats_identically():
+    """A model that re-issues the same state-changing call with the same arguments has
+    stopped making progress. Observed live: an identical vm_snapshot, then every remaining
+    step spent on host commands nobody asked for."""
+    d = zosd.Daemon()
+    d.auto, d.current_source = True, "user"      # auto so nothing prompts
+    calls = []
+
+    async def fake_shell(a):
+        calls.append(a["command"])
+        return "ok"
+
+    d.handlers["run_shell"] = fake_shell
+    _stub(d, [_call("run_shell", {"command": "echo same"}, f"c{i}") for i in range(6)])
+    out = asyncio.run(d.route("do it"))
+    assert "repeated" in out, out
+    assert calls == ["echo same"], calls          # the second one never ran
+
+
+def test_a_repeat_is_judged_on_arguments_not_just_the_tool():
+    d = zosd.Daemon()
+    d.auto, d.current_source = True, "user"
+    calls = []
+
+    async def fake_shell(a):
+        calls.append(a["command"])
+        return "ok"
+
+    d.handlers["run_shell"] = fake_shell
+    _stub(d, [_call("run_shell", {"command": "echo one"}, "c1"),
+              _call("run_shell", {"command": "echo two"}, "c2"),
+              {"content": "done"}])
+    assert asyncio.run(d.route("two things")) == "done"
+    assert calls == ["echo one", "echo two"], calls
+
+
+def test_pollable_tools_may_repeat_because_that_is_how_watching_works():
+    """job_read polling the same pane is the documented delegation loop, so the repeat
+    guard must not break it."""
+    d = zosd.Daemon()
+    d.auto, d.current_source = True, "user"
+    reads = []
+
+    async def fake_read(a):
+        reads.append(a["name"])
+        return "worker output"
+
+    d.handlers["job_read"] = fake_read
+    _stub(d, [_call("job_read", {"name": "zos-w-codex"}, "c1"),
+              _call("job_read", {"name": "zos-w-codex"}, "c2"),
+              _call("job_read", {"name": "zos-w-codex"}, "c3"),
+              {"content": "worker is done"}])
+    assert asyncio.run(d.route("watch the worker")) == "worker is done"
+    assert len(reads) == 3, reads
+
+
+def test_a_stopped_repeat_leaves_history_the_model_can_be_sent_again():
+    """Returning mid-batch would leave an assistant message carrying tool_calls with no
+    matching tool results — malformed, and it poisons the *next* request, not this one."""
+    d = zosd.Daemon()
+    d.auto, d.current_source = True, "user"
+
+    async def fake_shell(a):
+        return "ok"
+
+    d.handlers["run_shell"] = fake_shell
+    _stub(d, [_call("run_shell", {"command": "echo same"}, f"c{i}") for i in range(6)])
+    asyncio.run(d.route("do it"))
+    ids = {m["id"] for msg in d.history for m in (msg.get("tool_calls") or [])}
+    answered = {msg["tool_call_id"] for msg in d.history if msg.get("role") == "tool"}
+    assert ids <= answered, (ids, answered)
 
 
 def test_blocked_tool_never_executes_and_the_model_is_told():

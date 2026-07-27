@@ -213,9 +213,34 @@ this means by mode:
 - **auto** — every one of those runs unprompted. Wandering is not a hypothetical risk there;
   it is the observed default behaviour of the model on a finished task.
 
-`MAX_STEPS` is therefore the only thing bounding a wander in auto mode. Lowering it, or
-ending the loop when a `notify` has already reported completion, is the obvious hardening —
-untried so far, and recorded here because the behaviour is reproducible, not anecdotal.
+**The repeat guard.** `MAX_STEPS` was the only bound, and 12 steps of unrequested host
+commands is a poor one. Ending the loop on a `notify` was the obvious idea and is wrong
+twice: the observed wander never called `notify` at all, and a task like *"tell me X, then
+do Y"* would be silently truncated half-done.
+
+What the trace does show is a structural marker — the model re-issued
+`vm_snapshot {"name": "checkpoint"}`, byte-identical to a call it had already made, and
+every wandering command came after it. A model repeating a state-changing call with
+identical arguments is no longer making progress. So: **an identical `(tool, arguments)`
+pair within one request ends the loop.**
+
+`POLLABLE = {job_read, vm_see, vm_status, job_list}` is exempt, because repeating those
+*is* the work — `job_read` polling one pane is the documented delegation loop, and a guard
+that broke it would be worse than the wander.
+
+The stop happens **after the current batch finishes, never mid-batch.** Returning early
+would leave an assistant message carrying `tool_calls` with no matching `tool` results, and
+that malformed pair lands in `self.history` and corrupts the *next* request — a bug that
+would surface one request later than its cause. A test asserts every `tool_call_id` left in
+history has an answer.
+
+Measured on the same prompt that produced the wander: **12 calls with 7 unrequested host
+commands, down to 6 calls with 1.** The blocked repeat leaves no audit line, since it never
+reaches the gate — the journal records it (`stopped: vm_snapshot repeated with the same
+arguments`) and the user gets it as the reply.
+
+This is a heuristic, not a guarantee. It catches losing the thread, not a model that wanders
+with varied arguments; `MAX_STEPS` remains the backstop for that.
 
 ## Permission model
 
