@@ -308,7 +308,7 @@ auto                — everything allows; nothing prompts
 ```
 
 Auto is **sticky**: once on, it stays on until you say `guarded`. It does **not** time out.
-Three properties keep it survivable:
+Four properties keep it survivable:
 
 - **Reverts on daemon restart.** Startup state is always `guarded`. A crash, reboot, or
   `systemctl --user restart zos` drops back to guarded — auto is never the state you wake
@@ -319,6 +319,21 @@ Three properties keep it survivable:
   allowed *host* action fires an after-the-fact notification. Auto trades the veto, not the
   visibility. VM actions are not narrated — they are Safe already, and narrating a click
   storm would be noise.
+- **`guarded` is an emergency brake, and it lands mid-request.** `handle()` matches and
+  consumes mode text *before* taking the request lock, so saying `guarded` while a request
+  is already running takes effect at once instead of queueing behind it. The running
+  request is not killed — it keeps its place — but every gate decision it has not yet
+  reached now prompts. This is the only way to intervene in a request that is already
+  under way, which makes it exactly the property a runaway auto-mode request needs.
+
+  **Do not "fix" this by serialising mode changes with everything else.** Putting the mode
+  path behind the request lock looks tidier and reads as closing a race; what it actually
+  does is make the brake wait for the thing it is meant to stop. Pinned by
+  `test_a_mode_command_lands_while_a_request_is_still_running`, which holds the lock and
+  asserts the flip happened *while it was still held* — the obvious version of that test,
+  asserting the mode afterwards, passes either way, because releasing the lock lets a
+  blocked handler finish and flip it anyway. That first version was green against the
+  mutation and was only caught by testing it.
 
 **Mode commands are matched by the daemon, not the model.** Because plain English is the
 only input, "go full auto" is also plain English — if mode switching were a tool, a

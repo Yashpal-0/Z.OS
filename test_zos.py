@@ -153,6 +153,53 @@ def test_mode_command_never_reaches_the_model():
     assert routed == ["list my files"], routed
 
 
+def test_a_mode_command_lands_while_a_request_is_still_running():
+    """`guarded` is the emergency brake, and a brake that queues is not a brake.
+
+    handle() consumes mode text *before* taking the request lock, so the one situation
+    the brake exists for — a request already running in auto mode, doing something the
+    user wants stopped — cannot delay it. The in-flight request keeps going, but every
+    gate decision it has not yet made now prompts.
+
+    Pinned because the bug would be introduced by tidying: serialising mode changes with
+    everything else looks more correct, reads as a race being fixed, and silently removes
+    the only way to intervene in a request that is already under way. Nothing else in the
+    suite would notice — the mode tests all run against an idle daemon.
+
+    Held directly rather than by starting a real request: the lock is the whole mechanism,
+    and taking it is what a router mid-flight does. If the mode path ever moves behind it
+    this times out and fails rather than deadlocking the suite.
+    """
+    d = zosd.Daemon()
+    d.auto = True                      # set directly; set_mode(True) raises a real badge
+
+    async def main():
+        zosd.SOCK.unlink(missing_ok=True)
+        srv = await asyncio.start_unix_server(d.handle, path=zosd.SOCK)
+        async with d.lock:             # stands in for a request mid-flight
+            r, w = await asyncio.open_unix_connection(zosd.SOCK)
+            w.write(json.dumps({"source": "user", "text": "guarded"}).encode())
+            await w.drain(); w.write_eof()
+            await r.read(); w.close()
+            for _ in range(40):        # ~2s, far longer than an un-blocked path needs
+                if d.auto is False:
+                    break
+                await asyncio.sleep(0.05)
+            # Both readings must be taken *here*, still inside the lock. Asserting on
+            # d.auto after the block is a tautology that passes either way: releasing the
+            # lock lets a blocked handle() finish, so the mode flips regardless and the
+            # test proves only that set_mode eventually ran. Caught by mutation — moving
+            # the mode path behind the lock left the first version of this test green.
+            flipped_while_locked, still_held = d.auto is False, d.lock.locked()
+        srv.close()
+        zosd.SOCK.unlink(missing_ok=True)
+        return flipped_while_locked, still_held
+
+    flipped, held = asyncio.run(main())
+    assert held is True, "the test must still hold the lock to prove anything"
+    assert flipped is True, "a mode command must not wait for the running request to finish"
+
+
 # ---- prompt ----------------------------------------------------------------
 
 def test_broken_prompt_is_fail_not_deny():
