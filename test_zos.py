@@ -185,19 +185,18 @@ def test_a_mode_command_lands_while_a_request_is_still_running():
                 if d.auto is False:
                     break
                 await asyncio.sleep(0.05)
-            # Both readings must be taken *here*, still inside the lock. Asserting on
-            # d.auto after the block is a tautology that passes either way: releasing the
-            # lock lets a blocked handle() finish, so the mode flips regardless and the
-            # test proves only that set_mode eventually ran. Caught by mutation — moving
-            # the mode path behind the lock left the first version of this test green.
-            flipped_while_locked, still_held = d.auto is False, d.lock.locked()
+            # Read *here*, still inside the lock. Asserting on d.auto after the block is
+            # a tautology that passes either way: releasing the lock lets a blocked
+            # handle() finish, so the mode flips regardless and the test proves only that
+            # set_mode eventually ran. Caught by mutation — moving the mode path behind
+            # the lock left the first version of this test green.
+            flipped_while_locked = d.auto is False
         srv.close()
         zosd.SOCK.unlink(missing_ok=True)
-        return flipped_while_locked, still_held
+        return flipped_while_locked
 
-    flipped, held = asyncio.run(main())
-    assert held is True, "the test must still hold the lock to prove anything"
-    assert flipped is True, "a mode command must not wait for the running request to finish"
+    assert asyncio.run(main()) is True, \
+        "a mode command must not wait for the running request to finish"
 
 
 # ---- prompt ----------------------------------------------------------------

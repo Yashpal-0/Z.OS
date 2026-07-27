@@ -326,6 +326,16 @@ Four properties keep it survivable:
   reached now prompts. This is the only way to intervene in a request that is already
   under way, which makes it exactly the property a runaway auto-mode request needs.
 
+  The path is unlocked in **both** directions, so `auto` also lands mid-request — and that
+  is the direction worth checking, because it widens. It is safe only because of an
+  ordering in `_decide_fast`: `self.denied` is tested *before* `self.auto`. A standing
+  denial therefore outranks a mid-request `auto`, and an action the user has already
+  vetoed cannot be resurrected by switching modes inside the same request. That ordering
+  is load-bearing for this property, not just for the retry-around-a-Deny case it was
+  written for. The claim that a mid-request `guarded` makes the remaining decisions prompt
+  rests on `_decide_fast` reading `self.auto` live rather than snapshotting it, which
+  `test_auto_is_sticky_and_never_expires` pins.
+
   **Do not "fix" this by serialising mode changes with everything else.** Putting the mode
   path behind the request lock looks tidier and reads as closing a race; what it actually
   does is make the brake wait for the thing it is meant to stop. Pinned by
