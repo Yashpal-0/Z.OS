@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""zos-watch — live tail of Z.OS tool calls.
+
+Usage:  ./zos-watch
+        ./zos-watch --full        # show full command detail, not truncated
+        ./zos-watch --journal     # also show raw systemd journal lines (model chatter)
+"""
+import sys
+import json
+import os
+import time
+import datetime
+import subprocess
+import argparse
+import pathlib
+
+AUDIT = pathlib.Path.home() / ".local/share/zos/audit.log"
+FULL  = "--full"   in sys.argv
+JOUR  = "--journal" in sys.argv
+
+# ANSI colours
+GRN  = "\033[32m"
+RED  = "\033[31m"
+YLW  = "\033[33m"
+CYN  = "\033[36m"
+GRY  = "\033[90m"
+BLD  = "\033[1m"
+RST  = "\033[0m"
+
+TIER_COLOR = {"vm": CYN, "host": YLW, "": GRY}
+
+
+def fmt_entry(line: str) -> str | None:
+    try:
+        e = json.loads(line)
+    except Exception:
+        return None
+
+    ts      = datetime.datetime.fromtimestamp(e["ts"]).strftime("%H:%M:%S")
+    tool    = e.get("tool", "?")
+    verdict = e.get("verdict", "?")
+    tier    = e.get("tier", "")
+    intent  = e.get("intent", "")
+    detail  = e.get("detail", "")
+    reason  = e.get("reason", "")
+    mode    = e.get("mode", "")
+
+    icon   = f"{GRN}✓{RST}" if verdict == "allow" else f"{RED}✗{RST}"
+    tc     = TIER_COLOR.get(tier, GRY)
+    ttag   = f"{tc}[{tier:4}]{RST}" if tier else "      "
+    tname  = f"{BLD}{tool:16}{RST}"
+
+    trunc = 120 if FULL else 72
+    det   = detail[:trunc] + ("…" if len(detail) > trunc else "")
+
+    parts = [f"{GRY}{ts}{RST} {icon} {tname} {ttag}  {det}"]
+
+    # show reason only when it's interesting (not "safe class")
+    if verdict != "allow" or reason not in ("safe class", "auto mode",
+                                             "readonly allowlist", "user allowed"):
+        parts.append(f"           {GRY}↳ {reason}{RST}")
+
+    if intent and tool not in ("_mode",):
+        short_intent = intent[:80] + ("…" if len(intent) > 80 else "")
+        parts.append(f"           {GRY}» {short_intent}{RST}")
+
+    return "\n".join(parts)
+
+
+def tail(path: pathlib.Path):
+    """Follow a file from its current end, yielding new lines."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    with open(path) as f:
+        f.seek(0, 2)  # seek to end
+        while True:
+            line = f.readline()
+            if line:
+                yield line.rstrip()
+            else:
+                time.sleep(0.15)
+
+
+def main():
+    print(f"{BLD}Z.OS live — watching {AUDIT}{RST}")
+    print(f"{GRY}{'─'*72}{RST}")
+
+    if JOUR:
+        # Also stream journal in a subprocess
+        import threading
+        def _jour():
+            proc = subprocess.Popen(
+                ["journalctl", "--user", "-u", "zos.service", "-f", "--no-pager",
+                 "--output=cat"],
+                stdout=subprocess.PIPE, text=True)
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    print(f"  {GRY}[journal] {line}{RST}", flush=True)
+        threading.Thread(target=_jour, daemon=True).start()
+
+    for raw in tail(AUDIT):
+        out = fmt_entry(raw)
+        if out:
+            print(out, flush=True)
+
+
+if __name__ == "__main__":
+    main()
