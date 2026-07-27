@@ -201,6 +201,22 @@ exchanges. Resets on restart, like the mode.
 part — but only when the model calls `vm_see`. An unconditional screenshot per request
 would cost latency and tokens for the ~90% of intents that are pure shell.
 
+**The cap is not a formality — it is load-bearing.** Observed live: after finishing a VM
+task correctly at step 4 (create a file, snapshot, confirm), the model did not stop. It
+spent its remaining steps on unrelated *host* introspection — `ps aux`, `tmux ls`,
+`ls -l /proc/<pid>/cwd`, and a recursive `grep` through **Z.OS's own repository** — until
+`MAX_STEPS` ended it. Nothing was destructive and the gate prompted for each, but note what
+this means by mode:
+
+- **guarded** — a run of consecutive prompts for commands the user never asked for. Annoying,
+  and worse, it trains the reflex of clicking Allow.
+- **auto** — every one of those runs unprompted. Wandering is not a hypothetical risk there;
+  it is the observed default behaviour of the model on a finished task.
+
+`MAX_STEPS` is therefore the only thing bounding a wander in auto mode. Lowering it, or
+ending the loop when a `notify` has already reported completion, is the obvious hardening —
+untried so far, and recorded here because the behaviour is reproducible, not anecdotal.
+
 ## Permission model
 
 **The gate is one function in our own dispatch path.** No framework to route around:
@@ -501,6 +517,13 @@ The VM is a safety mechanism only if it is actually isolated. Non-negotiable:
 
 A VM with a host directory mounted read-write is not a sandbox — it is a slower path to the
 same damage.
+
+**Restore is verified, not assumed.** Every `vm_*` tool is ungated on the argument that
+mistakes in the guest are revertible, so that argument is worth exactly as much as the
+restore path actually working. Checked end to end against the live guest: write a marker
+file, snapshot, delete the file, `vm_restore`, and the file is back. Until this was run the
+whole justification for the ungated tier rested on an untested assumption — `vm_snapshot`
+had never once been called in ~320 live tool invocations.
 
 ## Files
 

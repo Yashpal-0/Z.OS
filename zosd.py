@@ -425,6 +425,10 @@ class Daemon:
                 # The model answered in text without calling notify. route()'s return
                 # value is the only place that text exists, so dropping it here is a
                 # silent no-op — the one failure mode a headless daemon cannot afford.
+                # It is also the one reply that leaves no audit line, because nothing
+                # passed the gate. A faded notification is then the only record there
+                # ever was, so "Z.OS ignored me" is not diagnosable after the fact.
+                print(f"answered without tools: {out[:300]}", file=sys.stderr, flush=True)
                 await asyncio.create_subprocess_exec(
                     NOTIFY, "Z.OS", out[:300], stderr=asyncio.subprocess.DEVNULL)
 
