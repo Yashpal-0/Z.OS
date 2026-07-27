@@ -672,9 +672,24 @@ Two tools lie here, and both cost time:
   physical press is evidence.
 
 `org.gnome.SettingsDaemon.MediaKeys.service` sets `RefuseManualStart`/`RefuseManualStop`,
-so it cannot be restarted by hand. It grabs accelerators at startup, so **after changing
-these settings, log out and back in** rather than expecting the new binding to register
-mid-session.
+so `systemctl --user restart` on the *service* is refused. Restarting its **target** works
+and is not refused, because the service is `PartOf` it:
+
+```bash
+systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.target
+```
+
+That replaces the earlier advice to log out. It does re-grab accelerators — but see §5:
+it did not make the binding fire, so a stale `gsd-media-keys` was not the cause.
+
+**`gnome-shell` cannot be restarted this way on Wayland, and that is the harder half.**
+A GNOME "log out / log in" on this machine did *not* restart the session: after one,
+`gnome-shell` and `gsd-media-keys` still carried their process start times from three days
+earlier. Check before believing a re-login took effect:
+
+```bash
+ps -o lstart= -p "$(pgrep -x gnome-shell)"
+```
 
 ### 5. The daemon's own hotkey listener
 
@@ -697,8 +712,8 @@ unit tests for exactly this — including one asserting the listener remembers n
 the modifier — because "it does not log keystrokes" has to be checkable, not trusted.
 
 Both paths run the same client, so a duplicate would open two dialogs. A short grace period
-lets the GNOME binding win when it works, and before firing the daemon checks whether a
-client is already up.
+lets the GNOME binding win when it works — on this machine it never has (see Status) — and
+before firing the daemon checks whether a client is already up.
 
 **That check is a lock the client holds, not a process search** — `flock` on
 `$XDG_RUNTIME_DIR/zos-client.lock`, taken by the client for as long as its box is open. The
@@ -735,14 +750,51 @@ That harness is also what found the `/proc` scan bug above — its own invoking 
 the fake client in an `rm`, and the listener dutifully stood down. Worth stating plainly:
 the offline suite had passed throughout, because it had never run this wiring at all.
 
-**Two things remain unproven, and no synthetic test can prove them:**
+**Verified by physical press.** `_keyboards()` does find the physical keyboard: real
+presses log `hotkey: meta+space detected`, and the box opens. The listener is the working
+owner of Super+Space.
 
-- that `_keyboards()` finds the *physical* keyboard — which is why the uinput device has to
-  be injected past the glob rather than through it;
-- that GNOME's `<Super>space` binding fires at all, for the reason in §4.
+**GNOME's binding does not fire, and the daemon's logs alone could not show that.**
+`hotkey: client already open, standing down` reports *state* — a lock is held — not *cause*.
+The daemon deduping against a box it opened itself seven seconds earlier produces the
+identical line, so a run of standing-down entries reads as "GNOME is winning the race" when
+it may mean nothing of the kind. The client therefore logs its **parent** before taking the
+lock:
 
-Both need one physical press after a re-login. `_fire_hotkey` logs on both branches so that
-press is conclusive: `meta+space detected` + `client already open, standing down` means both
-owners work; `meta+space detected` + `opening the client` means the listener works and
-GNOME's binding does not; no `meta+space detected` line means only GNOME fired and the glob
-is not finding the keyboard.
+```bash
+logger -t zos-client "launched by $PPID $(ps -o comm= -p $PPID 2>/dev/null)" 2>/dev/null || true
+```
+
+The parent is causal where the lock state is not: `python` is the daemon, `gsd-media-keys`
+is GNOME. Logged *before* the lock so a launch that loses the race still records itself —
+otherwise the losing owner is exactly the one that leaves no trace. `|| true` and a
+discarded stderr are mandatory here for the §5 reason: under `set -euo pipefail` a missing
+`logger` would turn a diagnostic into a dead hotkey.
+
+Every observed press logs one launch, parent `python`. Never `gsd-media-keys`.
+
+Ruled out as causes:
+
+| Suspect | Ruled out by |
+|---|---|
+| ibus / input-source grab on `<Super>space` | `switch-input-source` is `XF86Keyboard`, ibus triggers `[]`, no input sources configured |
+| stale `gsd-media-keys` predating the config | restarted via its target; a fresh process behaves identically |
+| a conflict specific to `<Super>space` | rebound the same custom keybinding to `<Super>F9` — the listener ignores F9 by design, so GNOME was the only possible owner, and **nothing launched** |
+
+That last one is the decisive experiment: it isolates GNOME's path completely. The failure
+is GNOME custom keybindings in general in this session, not this key.
+
+**The remaining hypothesis needs a real reboot, not a re-login.** `gnome-shell` has held
+its accelerator grabs since before the keybinding existed, and on Wayland it cannot be
+restarted without ending the session — which a GNOME log out did not do here (§4). Whether
+a genuinely fresh session registers the binding is untested.
+
+**It changes nothing operationally.** The GNOME binding was always redundancy: the reason
+for owning the hotkey in the daemon is precisely that a desktop setting can be dropped by a
+reinstall or an upgrade. That redundancy has simply never been the one carrying the key.
+The config is left in place — it costs nothing and may start working after a reboot — but
+it must not be *relied* on, and the install steps should not claim the hotkey works because
+of it.
+
+The dedup lock keeps earning its place regardless of owner count: two presses in quick
+succession would otherwise open two boxes.
