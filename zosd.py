@@ -103,6 +103,38 @@ def match_mode(text: str):
     return MODE_WORDS.get(text.strip().lower())
 
 
+def _trim(msgs: list[dict]) -> list[dict]:
+    """Keep the last MAX_HISTORY messages, but never begin on an orphaned tool result.
+
+    A blind `[-MAX_HISTORY:]` cuts wherever the count lands, and the model batches several
+    tool calls per step, so the cut can fall *between* an assistant message carrying
+    `tool_calls` and the `tool` messages answering them. What survives is a history that
+    opens with a result to a call that is no longer there. The endpoint rejects it —
+    measured against the real API, `400 INVALID_ARGUMENT`,
+    `function_response.name: Name cannot be empty`.
+
+    That failure is worse than it first looks, for two reasons:
+
+    - **It is delayed.** The bad slice is written at the end of a long request, which
+      itself succeeds. The next request is the one that dies, so the symptom appears one
+      request after the cause and looks unrelated to the work that produced it.
+    - **It is permanent.** `route()` raises inside `_call_model`, before any of the
+      `self.history = ...` assignments, so the poisoned history is never replaced. Every
+      later request rebuilds the same messages and fails identically. Only a daemon
+      restart clears it — a silent, self-sustaining wedge rather than one bad turn.
+
+    Dropping leading `tool` messages is enough: every other role is valid at the head, and
+    the tail is always whole because a batch's results are all appended before history is
+    ever written. Reachable in ~3% of randomised realistic shapes (1-3 calls per step over
+    6-12 steps) — rare enough to survive a long time unexplained.
+    """
+    h = msgs[-MAX_HISTORY:]
+    i = 0
+    while i < len(h) and h[i].get("role") == "tool":
+        i += 1
+    return h[i:]
+
+
 def audit(**fields) -> None:
     AUDIT.parent.mkdir(parents=True, exist_ok=True)
     with AUDIT.open("a") as f:
@@ -336,7 +368,7 @@ class Daemon:
                 msgs.append({"role": "assistant", "content": m.get("content") or "",
                              **({"tool_calls": calls} if calls else {})})
                 if not calls:
-                    self.history = msgs[1:][-MAX_HISTORY:]
+                    self.history = _trim(msgs[1:])
                     return m.get("content") or ""
                 stop = None
                 for c in calls:
@@ -385,9 +417,9 @@ class Daemon:
                     # leave an assistant message carrying tool_calls with no matching tool
                     # results, and that malformed pair goes into self.history and poisons
                     # the *next* request.
-                    self.history = msgs[1:][-MAX_HISTORY:]
+                    self.history = _trim(msgs[1:])
                     return stop
-            self.history = msgs[1:][-MAX_HISTORY:]
+            self.history = _trim(msgs[1:])
             return f"gave up after {MAX_STEPS} steps"
 
     # ---- modes -----------------------------------------------------------

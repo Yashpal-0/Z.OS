@@ -567,6 +567,38 @@ def test_a_standing_denial_does_not_leak_into_the_next_request():
     asyncio.run(d.route("a new request"))
     assert d.denied is False
 
+def test_history_never_starts_on_an_orphaned_tool_result():
+    """A blind tail slice can cut between an assistant's tool_calls and their results.
+
+    The endpoint rejects the leftover — measured against the real API, `400
+    INVALID_ARGUMENT`, `function_response.name: Name cannot be empty`. Both properties of
+    that failure are nasty: it is written at the end of a long request that *succeeds*, so
+    the next request is the one that dies, and route() raises before any `self.history =`
+    assignment, so the poisoned history is never replaced and every later request fails the
+    same way until the daemon is restarted.
+
+    Shaped so the cut lands on a tool result deterministically: 42 messages, the assistant
+    at index 1 and its three results at 2-4, so `[-40:]` starts exactly on the first result
+    with its call gone.
+    """
+    calls = [{"id": i, "function": {"name": "run_shell", "arguments": "{}"}}
+             for i in ("a", "b", "c")]
+    msgs = ([{"role": "user", "content": "go"},
+             {"role": "assistant", "content": "", "tool_calls": calls}]
+            + [{"role": "tool", "tool_call_id": i, "content": "ok"} for i in ("a", "b", "c")]
+            + [{"role": "user" if n % 2 else "assistant", "content": f"filler {n}"}
+               for n in range(37)])
+    assert len(msgs) == zosd.MAX_HISTORY + 2, len(msgs)
+    assert msgs[-zosd.MAX_HISTORY:][0]["role"] == "tool", "shape no longer exercises the cut"
+
+    kept = zosd._trim(msgs)
+    have = {c["id"] for m in kept if m.get("tool_calls") for c in m["tool_calls"]}
+    orphans = [m["tool_call_id"] for m in kept
+               if m["role"] == "tool" and m["tool_call_id"] not in have]
+    assert orphans == [], f"tool results with no matching call: {orphans}"
+    assert len(kept) <= zosd.MAX_HISTORY, len(kept)
+    assert kept[-1] == msgs[-1], "the newest message must survive trimming"
+
 
 # ---- the user always finds out ---------------------------------------------
 

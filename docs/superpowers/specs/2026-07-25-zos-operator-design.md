@@ -234,6 +234,35 @@ that malformed pair lands in `self.history` and corrupts the *next* request — 
 would surface one request later than its cause. A test asserts every `tool_call_id` left in
 history has an answer.
 
+**The same corruption had a second door: the history trim.** Guarding the batch boundary
+does nothing about `MAX_HISTORY`, and `self.history = msgs[1:][-MAX_HISTORY:]` cut wherever
+the count happened to land. Because the model batches several calls per step — and a
+`vm_see` inserts an extra `user` image message mid-batch — the cut could fall *between* an
+assistant's `tool_calls` and the `tool` messages answering them, leaving a history that
+opens on a result whose call is gone. It is the mirror image of the mid-batch bug: that one
+truncates the head of a group, this one truncates its tail from the other side.
+
+Confirmed rather than reasoned about. A randomised sweep of realistic shapes (1-3 calls per
+step over 6-12 steps) orphaned a result in **~3%** of histories, and one real API call with
+a hand-built orphan returned **`400 INVALID_ARGUMENT`,
+`function_response.name: Name cannot be empty`** — so the endpoint does reject it rather
+than tolerating it.
+
+Two properties made this worth fixing ahead of anything else outstanding:
+
+- **Delayed.** The bad slice is written at the end of a long request that *succeeds*. The
+  next request is the one that fails, so the symptom points at innocent work.
+- **Permanent.** `route()` raises inside `_call_model`, before any `self.history = ...`
+  assignment, so the poison is never overwritten. Every later request rebuilds the same
+  messages and fails identically — Z.OS goes deaf until the daemon is restarted, with
+  `model HTTP 400` as the only clue.
+
+`_trim()` drops leading `tool` messages after slicing. That is sufficient: every other role
+is valid at the head, and the tail is always whole because a batch's results are all
+appended before history is written. Pinned by
+`test_history_never_starts_on_an_orphaned_tool_result`, verified by mutation — restoring the
+blind slice fails it on the orphan assertion.
+
 Measured on the same prompt that produced the wander: **12 calls with 7 unrequested host
 commands, down to 6 calls with 1.** The blocked repeat leaves no audit line, since it never
 reaches the gate — the journal records it (`stopped: vm_snapshot repeated with the same
