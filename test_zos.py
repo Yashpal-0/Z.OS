@@ -646,6 +646,25 @@ def test_a_client_holding_the_lock_is_detected():
         assert zosd._client_open() is False
 
 
+def test_the_daemon_and_the_client_agree_on_the_lock():
+    """They derive the path independently — daemon from SOCK, client from
+    XDG_RUNTIME_DIR — and if they ever diverge dedup stops working with no symptom but
+    two boxes. A rename on either side has to fail somewhere; here."""
+    client = pathlib.Path(__file__).with_name("zos").read_text()
+    assert zosd.SOCK.with_name("zos-client.lock").name in client
+    assert "XDG_RUNTIME_DIR" in client, "client must resolve the same directory as SOCK"
+
+
+def test_the_client_shows_its_box_even_if_it_cannot_lock():
+    """Locking must never be able to suppress the box. GNOME discards the client's stderr,
+    so an early exit is indistinguishable from a dead hotkey — the failure this whole
+    mechanism exists to prevent."""
+    client = pathlib.Path(__file__).with_name("zos").read_text()
+    assert "command -v flock" in client, "a missing flock must fall through, not exit"
+    assert "{ exec 9>" in client, "an unopenable lock path must fall through, not exit"
+    assert "exec 9>&-" in client, "the lock must be released once the box is gone"
+
+
 def test_testing_the_lock_does_not_keep_it():
     """_client_open takes the lock to test it. If it did not give it straight back, the
     first press would lock out every later one."""

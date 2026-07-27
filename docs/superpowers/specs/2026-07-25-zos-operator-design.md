@@ -714,6 +714,17 @@ The daemon *takes* the lock to test it rather than only querying it. That is saf
 client is starting at that instant it loses the race and exits, and the daemon — having got
 the lock — then sees no client and starts one. Either way exactly one box opens.
 
+**Locking must never be able to suppress the box.** The client runs under `set -euo
+pipefail` and GNOME discards its stderr, so any exit before `zenity` looks exactly like a
+dead hotkey. A missing `flock` or an unopenable lock path therefore *falls through* and
+shows the box; only winning the lock and losing the race may exit. Verified by running the
+client with `flock` off `PATH` and with an unwritable `XDG_RUNTIME_DIR` — the box appears
+in both.
+
+The client also closes the lock fd once the box is gone (`exec 9>&-`), because it means
+"a box is up", nothing more. Left open, it is inherited by the `socat` that follows, and
+one hung socket write would keep the hotkey dead long after the dialog closed.
+
 **Status.** Everything from the file descriptor down is **verified against real kernel
 events** by `hotkey_check.py`, which creates a uinput virtual keyboard, points
 `_keyboards()` at its evdev node and runs the real `Daemon.watch_hotkey`. Observed: one

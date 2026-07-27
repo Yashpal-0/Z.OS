@@ -12,10 +12,18 @@ else
   # meaningless. Detecting the client by scanning /proc instead was wrong three times over
   # — a shell merely naming the path counted as a client, and argv[0] is the interpreter
   # for a script, not the script.
+  # Failing to lock must never suppress the box. GNOME discards this script's stderr, so
+  # an exit before zenity is indistinguishable from "the hotkey does not work" — the exact
+  # silent failure the lock exists to prevent. Only *winning* the lock and losing the race
+  # may exit; a missing flock or an unopenable path falls through and shows the box.
   LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/zos-client.lock"
-  exec 9>"$LOCK"
-  flock -n 9 || exit 0
+  if command -v flock >/dev/null 2>&1 && { exec 9>"$LOCK"; } 2>/dev/null; then
+    flock -n 9 || exit 0
+  fi
   text="$(zenity --entry --title="Z.OS" --text="" 2>/dev/null || true)"
+  # The lock means "a box is up", nothing more. Held any longer, an fd inherited by the
+  # socat below could keep the hotkey dead after the box is gone.
+  exec 9>&-
 fi
 [ -n "$text" ] || exit 0
 
