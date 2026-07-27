@@ -6,7 +6,7 @@ import json
 import os.path
 import shlex
 
-MAX_OUT = 4000        # truncate tool output so one `find /` cannot blow the context
+MAX_OUT = 16000       # truncate tool output so one `find /` cannot blow the context
 SEND_SETTLE = 0.25    # pause between typing text and pressing a key; see h_job_send
 
 
@@ -27,7 +27,7 @@ async def sh_rc(*argv: str) -> tuple[int, str]:
     return p.returncode, out.decode(errors="replace").strip()[:MAX_OUT]
 
 
-async def shell(cmd: str, timeout: int = 60) -> str:
+async def shell(cmd: str, timeout: int = 300) -> str:
     """Uses a real shell: pipes and redirection are most of a one-liner's value.
     That is exactly why the gate forces a prompt on any metacharacter."""
     p = await asyncio.create_subprocess_shell(

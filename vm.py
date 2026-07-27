@@ -136,11 +136,11 @@ async def h_vm_shell(a):
         *SSH, a["command"], stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT)
     try:
-        out, _ = await asyncio.wait_for(p.communicate(), timeout=120)
+        out, _ = await asyncio.wait_for(p.communicate(), timeout=300)
     except asyncio.TimeoutError:
         p.kill()
-        return "guest command timed out after 120s"
-    return out.decode(errors="replace").strip()[:4000] or f"exit {p.returncode}"
+        return "guest command timed out after 300s"
+    return out.decode(errors="replace").strip()[:16000] or f"exit {p.returncode}"
 
 
 async def h_vm_snapshot(a):

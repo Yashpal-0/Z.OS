@@ -69,8 +69,13 @@ def fmt_entry(line: str) -> str | None:
 
 def tail(path: pathlib.Path):
     """Follow a file from its current end, yielding new lines."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.touch(exist_ok=True)
+    try:
+        os.makedirs(path.parent, exist_ok=True)
+        path.touch(exist_ok=True)
+    except Exception:
+        pass
+    while not path.exists():
+        time.sleep(0.5)
     with open(path) as f:
         f.seek(0, 2)  # seek to end
         while True:

@@ -38,13 +38,13 @@ API_URL = os.environ.get(
     "ZOS_MODEL_URL",
     "https://generativelanguage.googleapis.com/v1beta/openai") + "/chat/completions"
 PROMPT_TIMEOUT = 60     # module-level so tests can shrink it
-MAX_STEPS = 12          # a runaway tool loop stops here
+MAX_STEPS = 64          # a runaway tool loop stops here
 
 # Repeating one of these with identical arguments is how the model *watches* something
 # change — a worker's pane, the VM screen — so it is normal and must stay allowed.
 # Repeating anything else identically means it has stopped making progress.
 POLLABLE = {"job_read", "vm_see", "vm_status", "job_list"}
-MAX_HISTORY = 40        # trimmed message list, bounds context growth
+MAX_HISTORY = 120       # trimmed message list, bounds context growth
 
 SYSTEM = """You are Z.OS, a headless operator on the user's Ubuntu GNOME (Wayland)
 desktop. You have no chat window: the user sees nothing unless you call notify, so
@@ -395,7 +395,7 @@ class Daemon:
         msgs = [{"role": "system", "content": SYSTEM}] + self.history + \
                [{"role": "user", "content": text}]
         seen: set[tuple[str, str]] = set()     # calls already made for *this* request
-        async with httpx.AsyncClient(timeout=120) as http:
+        async with httpx.AsyncClient(timeout=300) as http:
             for _ in range(MAX_STEPS):
                 m = await self._call_model(http, msgs)
                 calls = m.get("tool_calls") or []
