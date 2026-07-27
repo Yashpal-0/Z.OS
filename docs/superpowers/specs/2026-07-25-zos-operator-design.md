@@ -426,6 +426,23 @@ Z.OS cannot pass sudo's own password gate, and should not.
 
 In the guest, root is free — that is the point of the VM tier.
 
+**Verified 2026-07-27, without any password.** The wiring was designed and wired long
+before anything proved it fired: `zos.service` sets `SUDO_ASKPASS`, `zos-askpass` execs
+`zenity --password`, and exactly one `sudo -A` had ever run through Z.OS (`apt update`,
+04:04) — allowed by the user, but the audit log records the *verdict*, never whether sudo
+then succeeded. So it was tested by pointing `SUDO_ASKPASS` at a stub that logs a line and
+prints a deliberately wrong password: `sudo` invoked it **three** times (its retry limit)
+and refused with `Authentication failed`.
+
+That is the whole point of the method — a *rejected* password proves the plumbing better
+than an accepted one would, because it shows `sudo` reached the helper, read its stdout,
+and enforced its own gate, while never putting a real credential into a command line, a
+process table, or a transcript. Never verify this path by typing the actual password to
+make it "work"; the passing result carries no more information and the cost is a leaked
+secret. The remaining link — that a `zenity` dialog from a `systemd --user` service can
+actually reach the display — is proven independently by the gate dialogs, which are the
+same mechanism from the same process.
+
 ### Socket & audit
 
 - Unix socket at `$XDG_RUNTIME_DIR/zos.sock`, mode `0600`. **Never TCP**, not even

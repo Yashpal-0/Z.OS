@@ -10,6 +10,24 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-25-zos-operator-design.md`. It is the source of truth; this plan implements it. Build order is host tier first (Tasks 1-4), then VM tier (Tasks 5-6), then config and delegation (Tasks 7-8).
 
+> **STATUS: EXECUTED. Tasks 1-8 are all done. The checkboxes below were never ticked
+> during the build and are stale — do not read an empty box as remaining work.**
+>
+> Evidence, not memory: `tools.py`, `zosd.py`, `vm.py`, `test_zos.py` (64 tests, green),
+> `zos.service` + `zos-vm.service` both active, and `~/.local/share/zos/audit.log` with
+> ~390 real tool calls across both tiers. Per-task results live in the notes files —
+> `notes-live-host.md` (Task 4), `notes-delegation.md` (Task 8, including the two defects
+> a real worker exposed) — and every design decision that changed during the build was
+> folded back into the spec, which is the living document. This plan is history.
+>
+> This header exists because the stale boxes have a measured cost: on 2026-07-27 they
+> nearly caused Task 8 to be re-run against a fresh throwaway repo, spending a real
+> worker's tokens to re-prove a loop `notes-delegation.md` already documents end to end.
+>
+> Known-open items are tracked in the spec, not here: the cold-boot check, and GNOME's
+> custom keybinding (dead, cause unknown, and deliberately inert — the daemon's own
+> `/dev/input` listener owns Super+Space and works).
+
 ## Global Constraints
 
 - **Repo root (absolute — appears in the systemd units and the keybinding):** `/run/media/yash/External/Zerostic/Z.OS`
