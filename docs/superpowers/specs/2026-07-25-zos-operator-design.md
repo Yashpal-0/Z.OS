@@ -784,15 +784,19 @@ Ruled out as causes:
 That last one is the decisive experiment: it isolates GNOME's path completely. The failure
 is GNOME custom keybindings in general in this session, not this key.
 
-**The remaining hypothesis needs a real reboot, not a re-login.** `gnome-shell` has held
-its accelerator grabs since before the keybinding existed, and on Wayland it cannot be
-restarted without ending the session — which a GNOME log out did not do here (§4). Whether
-a genuinely fresh session registers the binding is untested.
+**Cause unknown — and a stale `gnome-shell` grab is not it.** That was the obvious next
+suspect, since `gnome-shell` has held its accelerator grabs since before the keybinding
+existed and on Wayland cannot be restarted without ending the session (which a GNOME log
+out did not do here, §4). But the F9 experiment already rules it out: `<Super>F9` was never
+bound to anything, by mutter or anyone else, so there was no stale grab on it to hold — and
+it still did not fire. A stale-grab explanation requires a pre-existing grab on the key in
+question. **Do not reboot chasing this**; the same isolation that ruled out the key conflict
+rules out the grab.
 
 **It changes nothing operationally.** The GNOME binding was always redundancy: the reason
 for owning the hotkey in the daemon is precisely that a desktop setting can be dropped by a
 reinstall or an upgrade. That redundancy has simply never been the one carrying the key.
-The config is left in place — it costs nothing and may start working after a reboot — but
+The config is left in place — it is inert and removing it buys nothing — but
 it must not be *relied* on, and the install steps should not claim the hotkey works because
 of it.
 
