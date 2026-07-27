@@ -145,7 +145,7 @@ do not.
    run_shell   type/key/click                     vm_see    (screendump)
    job_*       delegate(agy/codex) ──┐            vm_type   vm_key  vm_click
    notify      job_read / job_send <─┘  live loop  vm_shell  (ssh)
-                                                  vm_snapshot / vm_restore
+                                                   vm_snapshot / vm_restore
 ```
 
 ### Four moving parts
@@ -673,13 +673,14 @@ Per user decision ("do both"), the GNOME keybinding is not the only owner of Sup
 desktop setting a reinstall or a GNOME upgrade can silently drop.
 
 It reads raw `input_event` records (`struct llHHi`) from `/dev/input/by-path/*-event-kbd`
-and `by-id/*-event-kbd`, added to the event loop with `add_reader`. Requires membership in
-the `input` group. If no device is readable it logs and continues — the GNOME binding is
-still there.
+and `by-id/*-event-kbd`, added to the event loop with `add_reader`. Access comes from
+membership in the `input` group — checked, not assumed: the device is `root:input 0660`
+with no `uaccess` ACL, so the group is the only thing granting it. If no device is readable
+it logs and continues — the GNOME binding is still there.
 
 **This is the most invasive thing Z.OS does, so the restraint is structural, not a
 promise.** The detector is a ten-line class holding a set of currently-held modifier codes;
-it looks at exactly two key codes (`KEY_LEFTMETA`/`KEY_RIGHTMETA` and `KEY_SPACE`) and
+it looks at exactly three key codes (`KEY_LEFTMETA`, `KEY_RIGHTMETA`, `KEY_SPACE`) and
 retains nothing else. Nothing accumulates, nothing is logged, nothing is sent anywhere.
 Autorepeat (`value == 2`) is ignored so a held key cannot open a second dialog. There are
 unit tests for exactly this — including one asserting the listener remembers nothing but
@@ -688,3 +689,10 @@ the modifier — because "it does not log keystrokes" has to be checkable, not t
 Both paths run the same client, so a duplicate would open two dialogs. A short grace period
 lets the GNOME binding win when it works, and the daemon checks whether a client is already
 open (by scanning `/proc`, not `pgrep -f`, which matches its own invocation) before firing.
+
+**Status: the listener starts and logs its device count; the fire-and-dedup path is designed
+but not yet observed.** It needs a physical Super+Space — synthetic input is not evidence
+here for the same reason it is not evidence for the GNOME binding. `_fire_hotkey` logs on
+both branches specifically so that press is conclusive: one dialog plus
+`client already open, standing down` means both owners work and dedup works, whereas one
+dialog with no `meta+space detected` line at all means only GNOME fired.

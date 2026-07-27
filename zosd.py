@@ -448,9 +448,16 @@ class Daemon:
                 asyncio.create_task(self._fire_hotkey())
 
     async def _fire_hotkey(self):
+        # Both branches log, because one dialog on screen is otherwise ambiguous: the
+        # listener standing down after GNOME won looks exactly like the listener never
+        # having seen the key at all. The journal is the only place that difference shows.
+        print("hotkey: meta+space detected", file=sys.stderr, flush=True)
         await asyncio.sleep(HOTKEY_GRACE)
         if _client_open():
+            print("hotkey: client already open, standing down",
+                  file=sys.stderr, flush=True)
             return                      # GNOME's binding handled it; do not double-prompt
+        print("hotkey: opening the client", file=sys.stderr, flush=True)
         await asyncio.create_subprocess_exec(
             CLIENT, stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
