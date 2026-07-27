@@ -15,7 +15,7 @@ ExecStart=/usr/bin/qemu-system-x86_64 \
   -drive file=/run/media/yash/External/Zerostic/Z.OS/vm/zos-guest.qcow2,if=virtio,format=qcow2,node-name=zosdisk \
   -drive file=/run/media/yash/External/Zerostic/Z.OS/vm/seed.iso,if=virtio,format=raw \
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net,netdev=n0 \
-  -vga std -display none \
+  -vga std -display vnc=127.0.0.1:1 \
   -qmp unix:%t/zos-vm.sock,server,nowait
 Restart=on-failure
 RestartSec=5
