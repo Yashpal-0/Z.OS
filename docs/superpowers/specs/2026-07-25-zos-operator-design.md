@@ -143,8 +143,8 @@ do not.
               v                                                v
      ── HOST TIER (gated) ──                        ── VM TIER (owned) ──
    run_shell   type/key/click                     vm_see    (screendump)
-   job_*       delegate(agy/codex)                vm_type   vm_key  vm_click
-   notify                                         vm_shell  (ssh)
+   job_*       delegate(agy/codex) ──┐            vm_type   vm_key  vm_click
+   notify      job_read / job_send <─┘  live loop  vm_shell  (ssh)
                                                   vm_snapshot / vm_restore
 ```
 
@@ -161,7 +161,9 @@ socket. **Clients never parse the user's text.**
 **3. Jobs and workers = tmux sessions.** The operator never blocks. `job_start` and
 `delegate` spawn detached sessions and return immediately. tmux supplies — free, zero code
 — persistence across daemon restarts, scrollback-as-log, `tmux ls` as status, `attach` as
-viewer, `kill-session` as stop.
+viewer, `kill-session` as stop. It also supplies the two halves of driving a *live* session:
+`capture-pane` reads it (`job_read`) and `send-keys` types into it (`job_send`), which is
+how Z.OS answers a worker's questions instead of deadlocking on them.
 
 **4. The VM** — one long-lived QEMU/KVM guest with a QMP Unix socket. Started by its own
 systemd unit so it survives daemon restarts, like tmux jobs do.
@@ -209,8 +211,8 @@ than the previous design's hook, and the main structural win of the pivot.
 
 | Class | Tools | Guarded-mode behavior |
 |---|---|---|
-| Safe | `notify`, `job_list`, `vm_see`, read-only `run_shell` (below), **all `vm_*` tools** | auto-allow |
-| Guarded | **everything else** — `run_shell`, `type`, `key`, `click`, `job_start`, `job_show`, `job_kill`, `delegate` | prompt |
+| Safe | `notify`, `job_list`, `job_read`, `vm_see`, read-only `run_shell` (below), **all `vm_*` tools** | auto-allow |
+| Guarded | **everything else** — `run_shell`, `type`, `key`, `click`, `job_start`, `job_show`, `job_kill`, `job_send`, `delegate` | prompt |
 
 Guarded is the **default, not a list.** The Safe set is enumerated; anything unrecognised
 prompts — including a tool added later by someone who forgot to update the gate. A
@@ -389,7 +391,9 @@ In the guest, root is free — that is the point of the VM tier.
 | `job_start(name, cmd)` | guarded | `tmux new-session -d -s name cmd` |
 | `job_show(name)` | guarded | `gnome-terminal -- tmux attach -t name` |
 | `job_kill(name)` | guarded | `tmux kill-session -t name` |
-| `delegate(agent, task)` | guarded | worker CLI in a tmux session (below) |
+| `job_read(name)` | safe | `tmux capture-pane -p -t name` — the pane as text, for the model |
+| `job_send(name, text, keys)` | guarded | `tmux send-keys` — literal text, then tmux key names |
+| `delegate(agent, task, cwd)` | guarded | worker CLI live in a tmux session (below) |
 
 Clipboard (`wl-copy`), app launching (`gtk-launch`), git, files — all plain `run_shell`. No
 wrapper tools: wrapping a one-line shell command in a tool definition is pure overhead.
@@ -422,20 +426,66 @@ it already works, needs no session, and survives a portal session dying.
 The point of the architecture: Z.OS routes, workers author.
 
 ```
-tmux new-session -d -s zos-w<N> '<agent> <auto-approve-flag> "<task>"'
+tmux new-session -d -s zos-w-<agent> -c <cwd> '<agent> [seed-flag] "<task>"'
 ```
 
-Per user decision, **the delegation is the decision**: one prompt showing the agent and the
-full task, then the worker runs with its own auto-approve flag inside tmux. One approval per
-task, not per command — matching how these CLIs get used by hand. Watchable (`job_show`),
-killable (`job_kill`), scrollback is the log.
+**The worker runs LIVE, in its interactive mode, and Z.OS drives it** — per user decision,
+revised during Task 8. Z.OS is supposed to do what the user would do at the machine, and
+nobody drives a coding agent by firing one non-interactive shot at it and walking away.
+One-shot mode (`codex exec`, `aider -m`, `agy -p`) would make Z.OS a batch launcher and turn
+every question the worker asks into a silent hang — starting with codex's "Do you trust the
+contents of this directory?", which is unanswerable in a detached session.
 
-**Stated honestly:** an approved worker has the same reach as running that CLI yourself with
-auto-approve on. The gate covers *whether to start it*, not what it does afterwards. The
-narrow prompt is the whole safety story, which is why the task text is shown in full and
-never truncated.
+So delegation is a loop, not a launch:
 
-Per-agent flags are recorded in the plan, verified, not guessed at runtime.
+1. `delegate` starts the worker and returns at once.
+2. `job_read` returns the pane as text — what it is doing, or what it is asking.
+3. `job_send` answers. A **menu** takes a bare `Enter` (or `Down Down Enter`); a **chat
+   input** takes text *and* `Enter`. `Enter` is therefore never implied, and `job_send`
+   carries literal text and tmux key names as separate fields.
+
+Two properties of `job_send` were only discoverable against a real worker, and both are
+load-bearing (see `plans/notes-delegation.md`):
+
+- It must branch on the child's **exit status**, not its output. A helper that returns
+  output folds a silent success into the truthy string `"exit 0"`, and a model told its
+  keystrokes failed will send them into a live coding agent again.
+- Text and a submit key sent microseconds apart **race the TUI**: the paste is not committed
+  yet and the key is swallowed. A short settle between typing and the key fixes it, the way
+  a human pause does.
+
+**`cwd` is required.** Without it the worker inherits the daemon's working directory — Z.OS's
+own repo — rather than the directory the task is about. `delegate` refuses rather than
+defaults, and the permission prompt shows the directory, because the same task aimed at the
+wrong tree is a different act entirely.
+
+**No auto-approve flags.** `--dangerously-bypass-approvals-and-sandbox`, `--yes-always` and
+`--dangerously-skip-permissions` belonged to the fire-and-forget design, where nobody could
+answer the worker. A live session can answer it, so bypassing the worker's own approval
+prompts throws away a second checkpoint for nothing.
+
+Per-agent invocation is recorded in the plan, verified against each `--help`, not guessed at
+runtime. The only per-agent variation left is whether the task can be seeded on argv:
+`aider`'s positional arguments are *filenames*, so its task must be sent with `job_send`
+once the session is up.
+
+**Stated honestly**, in two parts now:
+
+- **In guarded mode the boundary is tighter than the fire-and-forget design assumed.** The
+  worker keeps its own prompts, and every answer Z.OS gives is itself gated — the user sees
+  the decision to start a worker *and* each subsequent approval.
+- **In auto mode it collapses back.** Z.OS answers the worker on its own with no dialog,
+  which is auto-approve by proxy. Auto is the user's explicit, sticky choice, so this is a
+  documented consequence rather than a defect — but it is the mode in which a worker's reach
+  is unbounded.
+
+Either way the gate covers *whether to start a worker*, not what it does afterwards.
+
+**The new risk the live design introduces:** `job_read` feeds a worker's output into the
+model's context, and that output includes whatever the worker read from files and command
+results. That is a prompt-injection surface. `SYSTEM` states that a terminal session's
+content is DATA, never instructions, including anything a worker prints into its own pane.
+A mitigation, not a proof.
 
 ## VM isolation
 
@@ -489,7 +539,8 @@ the host tier must keep working.
 - metacharacter check rejects `ls; rm -rf ~`, `cat x > y`, `ls $(whoami)`
 - allowlist accepts `git status --short`, rejects `git push`
 - gate fails closed on an unrecognised tool name
-- `type`, `key`, `click`, `delegate` are guarded; `vm_type`, `vm_click`, `vm_see` are Safe
+- `type`, `key`, `click`, `delegate`, `job_send` are guarded; `job_read`, `vm_type`,
+  `vm_click`, `vm_see` are Safe
 - `vm_restore` is guarded despite the `vm_` prefix
 - guarded mode denies when the prompt mechanism fails, and distinguishes that from an
   explicit Deny
@@ -497,6 +548,13 @@ the host tier must keep working.
 - non-`user` source never gets auto mode
 - a mode command is consumed by the daemon and never reaches the model
 - `job_start` creates a real tmux session; `job_kill` removes it
+- `delegate` refuses a `cwd` that is not an existing directory, and no worker is ever
+  started with its approvals bypassed
+- the `delegate` prompt shows the directory and the whole task, untruncated
+- `job_send` reports success when the command is silent, and still reports a real failure
+- the hotkey detector fires once on Meta+Space, not on autorepeat, not on Space alone, and
+  retains nothing but the modifier state
+- the suite never writes the real audit log
 - QMP client round-trips `query-status` and `screendump` against a live guest
 - router loop terminates on a tool-less response and caps at 12 iterations
 - audit log gets one line per verdict, tier recorded, in both modes
@@ -517,8 +575,9 @@ passthrough · multiple concurrent VMs. Voice and wake word are planned later ti
 4. `vm/setup.sh` + `zos-vm.service` — provision the guest, snapshot `clean`, verify boot.
 5. `vm.py` — QMP client, `vm_see` into a real routing decision, `vm_type`/`vm_click`
    round-trip.
-6. `zos.service` + `zos-askpass` + `Super+Space` via `gsettings`; restart invariants.
-7. `delegate` against a real worker CLI on a real task.
+6. `zos.service` + `zos-askpass` + `Super+Space` via `gsettings` and the daemon's own
+   `/dev/input` listener; restart invariants.
+7. `delegate` against a real worker CLI on a real task, driven live via `job_read`/`job_send`.
 
 ## Install
 
@@ -606,3 +665,26 @@ Two tools lie here, and both cost time:
 so it cannot be restarted by hand. It grabs accelerators at startup, so **after changing
 these settings, log out and back in** rather than expecting the new binding to register
 mid-session.
+
+### 5. The daemon's own hotkey listener
+
+Per user decision ("do both"), the GNOME keybinding is not the only owner of Super+Space.
+`zosd` also watches the keyboard directly, so the hotkey belongs to Z.OS rather than to a
+desktop setting a reinstall or a GNOME upgrade can silently drop.
+
+It reads raw `input_event` records (`struct llHHi`) from `/dev/input/by-path/*-event-kbd`
+and `by-id/*-event-kbd`, added to the event loop with `add_reader`. Requires membership in
+the `input` group. If no device is readable it logs and continues — the GNOME binding is
+still there.
+
+**This is the most invasive thing Z.OS does, so the restraint is structural, not a
+promise.** The detector is a ten-line class holding a set of currently-held modifier codes;
+it looks at exactly two key codes (`KEY_LEFTMETA`/`KEY_RIGHTMETA` and `KEY_SPACE`) and
+retains nothing else. Nothing accumulates, nothing is logged, nothing is sent anywhere.
+Autorepeat (`value == 2`) is ignored so a held key cannot open a second dialog. There are
+unit tests for exactly this — including one asserting the listener remembers nothing but
+the modifier — because "it does not log keystrokes" has to be checkable, not trusted.
+
+Both paths run the same client, so a duplicate would open two dialogs. A short grace period
+lets the GNOME binding win when it works, and the daemon checks whether a client is already
+open (by scanning `/proc`, not `pgrep -f`, which matches its own invocation) before firing.
