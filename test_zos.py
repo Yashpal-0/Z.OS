@@ -590,11 +590,12 @@ def test_history_never_starts_on_an_orphaned_tool_result():
     """
     calls = [{"id": i, "function": {"name": "run_shell", "arguments": "{}"}}
              for i in ("a", "b", "c")]
+    filler_count = zosd.MAX_HISTORY - 3
     msgs = ([{"role": "user", "content": "go"},
              {"role": "assistant", "content": "", "tool_calls": calls}]
             + [{"role": "tool", "tool_call_id": i, "content": "ok"} for i in ("a", "b", "c")]
             + [{"role": "user" if n % 2 else "assistant", "content": f"filler {n}"}
-               for n in range(37)])
+               for n in range(filler_count)])
     assert len(msgs) == zosd.MAX_HISTORY + 2, len(msgs)
     assert msgs[-zosd.MAX_HISTORY:][0]["role"] == "tool", "shape no longer exercises the cut"
 
