@@ -33,10 +33,10 @@ NOTIFY = "notify-send"
 # sat in state Sl waiting for a reply that no UI existed to send.
 PROMPT = "zenity"
 
-MODEL = os.environ.get("ZOS_MODEL", "gemini-3.6-flash")
+MODEL = os.environ.get("ZOS_MODEL", "openrouter/free")
 API_URL = os.environ.get(
     "ZOS_MODEL_URL",
-    "https://generativelanguage.googleapis.com/v1beta/openai") + "/chat/completions"
+    "https://openrouter.ai/api/v1") + "/chat/completions"
 PROMPT_TIMEOUT = 60     # module-level so tests can shrink it
 MAX_STEPS = 320         # a runaway tool loop stops here
 
@@ -380,7 +380,7 @@ class Daemon:
     # ---- router ----------------------------------------------------------
 
     async def _call_model(self, http, messages):
-        key = os.environ.get("GEMINI_API_KEY", "")
+        key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
         r = await http.post(API_URL, headers={"Authorization": f"Bearer {key}"},
                             json={"model": MODEL, "messages": messages,
                                   "tools": self.schemas})
