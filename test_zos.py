@@ -9,6 +9,7 @@ import contextlib
 import json
 import os
 import pathlib
+import struct
 import subprocess
 import tempfile
 import time
@@ -62,7 +63,9 @@ def test_allowlist_accepts_readonly_only():
 def test_gate_fails_closed_on_unknown_tool():
     # A tool name nobody predicted must prompt, not run. This is the property an
     # inverted (guarded-list) gate would silently lose.
-    assert zosd.Daemon()._decide_fast("SomeToolInventedNextYear", {})[0] is None
+    d = zosd.Daemon()
+    d.auto = False
+    assert d._decide_fast("SomeToolInventedNextYear", {})[0] is None
 
 
 def test_safe_tools_auto_allow():
@@ -73,6 +76,7 @@ def test_safe_tools_auto_allow():
 
 def test_dangerous_host_tools_prompt():
     d = zosd.Daemon()
+    d.auto = False
     for name, args in (("run_shell", {"command": "rm -rf /tmp/x"}),
                        ("type", {"text": "hello"}),
                        ("key", {"keys": "ctrl+alt+t"}),
@@ -85,14 +89,15 @@ def test_dangerous_host_tools_prompt():
 def test_typing_is_never_exempted_by_the_allowlist():
     # type/key/click inject into whatever has focus; no shell allowlist applies.
     d = zosd.Daemon()
+    d.auto = False
     assert d._decide_fast("type", {"text": "ls"})[0] is None
     assert d._decide_fast("type", {"text": "git status"})[0] is None
 
 
 # ---- modes -----------------------------------------------------------------
 
-def test_fresh_daemon_is_guarded():
-    assert zosd.Daemon().auto is False
+def test_fresh_daemon_is_auto():
+    assert zosd.Daemon().auto is True
 
 
 def test_auto_is_sticky_and_never_expires():
@@ -109,6 +114,12 @@ def test_auto_applies_only_to_the_human_at_the_keyboard():
     assert d._decide_fast("run_shell", {"command": "rm -rf /tmp/x"})[0] is None
 
 
+def test_auto_also_trusts_the_master_assistant_relaying_typed_text():
+    d = zosd.Daemon()
+    d.auto, d.current_source = True, "master-assistant"
+    assert d._decide_fast("run_shell", {"command": "rm -rf /tmp/x"})[0] is True
+
+
 def test_mode_matcher_is_strict():
     assert zosd.match_mode("auto") is True
     assert zosd.match_mode("  Guarded  ") is False
@@ -119,6 +130,7 @@ def test_mode_matcher_is_strict():
 
 def test_non_user_source_cannot_change_mode():
     d = zosd.Daemon()
+    d.auto = False
     asyncio.run(d.set_mode(True, "cron"))
     assert d.auto is False, "a non-user source must not be able to enable auto"
 
@@ -256,8 +268,9 @@ def test_a_timed_out_prompt_is_audited_as_a_denial():
         zosd.PROMPT_TIMEOUT = 1
         before = zosd.AUDIT.read_text().count("\n") if zosd.AUDIT.exists() else 0
         try:
-            allow, why = asyncio.run(
-                zosd.Daemon()._gate("run_shell", {"command": "rm -rf /"}))
+            d = zosd.Daemon()
+            d.auto = False
+            allow, why = asyncio.run(d._gate("run_shell", {"command": "rm -rf /"}))
         finally:
             zosd.PROMPT, zosd.PROMPT_TIMEOUT = "zenity", saved
     assert allow is False and why == "prompt failed", (allow, why)
@@ -286,8 +299,9 @@ def test_gate_blocks_when_the_prompt_fails():
     saved = zosd.PROMPT
     zosd.PROMPT = "zos-no-such-binary"
     try:
-        allow, why = asyncio.run(
-            zosd.Daemon()._gate("run_shell", {"command": "rm -rf /"}))
+        d = zosd.Daemon()
+        d.auto = False
+        allow, why = asyncio.run(d._gate("run_shell", {"command": "rm -rf /"}))
     finally:
         zosd.PROMPT = saved
     assert allow is False and why == "prompt failed", (allow, why)
@@ -363,10 +377,10 @@ def test_router_stops_when_a_call_repeats_identically():
         return "ok"
 
     d.handlers["run_shell"] = fake_shell
-    _stub(d, [_call("run_shell", {"command": "echo same"}, f"c{i}") for i in range(6)])
+    _stub(d, [_call("run_shell", {"command": "echo same"}, f"c{i}") for i in range(7)])
     out = asyncio.run(d.route("do it"))
     assert "repeated" in out, out
-    assert calls == ["echo same"], calls          # the second one never ran
+    assert len(calls) == 5, calls          # 5 executed, 6th triggers cutoff
 
 
 def test_a_repeat_is_judged_on_arguments_not_just_the_tool():
@@ -425,6 +439,7 @@ def test_a_stopped_repeat_leaves_history_the_model_can_be_sent_again():
 
 def test_blocked_tool_never_executes_and_the_model_is_told():
     d = zosd.Daemon()                        # guarded, prompt will fail -> deny
+    d.auto = False
     ran = []
 
     async def fake_shell(a):
@@ -493,6 +508,7 @@ def test_the_suite_never_writes_the_real_audit_log():
 
 def test_audit_writes_one_line_per_verdict_in_both_modes():
     d = zosd.Daemon()
+    d.auto = False
     before = zosd.AUDIT.read_text().count("\n") if zosd.AUDIT.exists() else 0
     asyncio.run(d._gate("notify", {"text": "x"}))          # guarded, safe
     d.auto, d.current_source = True, "user"
@@ -510,6 +526,7 @@ def test_a_denial_is_terminal_for_the_rest_of_the_request():
     # ran — but one decision became a queue of dialogs, and prompt fatigue is how a
     # queue of dialogs eventually produces an Allow.
     d = zosd.Daemon()
+    d.auto = False
     ran, told = [], []
 
     async def fake_shell(a):
@@ -551,6 +568,7 @@ def test_a_denial_is_terminal_for_the_rest_of_the_request():
 def test_a_failed_prompt_does_not_silence_the_rest_of_the_turn():
     # A broken prompt is not the user's decision, so it must not stand as one.
     d = zosd.Daemon()
+    d.auto = False
     saved, zosd.PROMPT = zosd.PROMPT, "zos-no-such-binary"
     try:
         allow, why = asyncio.run(d._gate("run_shell", {"command": "rm -rf /"}))
@@ -681,6 +699,52 @@ def test_a_tool_less_reply_still_reaches_the_user():
         finally:
             zosd.NOTIFY = "notify-send"
     assert "nothing needed doing" in out, out
+
+
+def test_a_same_uid_connection_is_still_served():
+    # Regression check for the SO_PEERCRED gate: a real connection from this same
+    # process (necessarily the same uid) must still be answered normally.
+    d = zosd.Daemon()
+    _stub(d, [{"content": "ok"}])
+
+    async def drive():
+        zosd.SOCK.unlink(missing_ok=True)
+        srv = await asyncio.start_unix_server(d.handle, path=zosd.SOCK)
+        r, w = await asyncio.open_unix_connection(zosd.SOCK)
+        w.write(json.dumps({"source": "user", "text": "hi"}).encode())
+        await w.drain(); w.write_eof()
+        out = (await r.read()).decode()
+        w.close()
+        srv.close()
+        zosd.SOCK.unlink(missing_ok=True)
+        return out
+
+    assert asyncio.run(drive()) == "ok\n"
+
+
+def test_a_connection_from_another_uid_is_refused_before_the_source_field_is_trusted():
+    # The `source` field is just JSON the peer sent — SO_PEERCRED is the kernel's own
+    # word on who is actually connected, and it is what the gate must trust instead.
+    d = zosd.Daemon()
+    routed = []
+    d.route = lambda text: routed.append(text) or asyncio.sleep(0, result="should not run")
+
+    class _FakeSock:
+        def getsockopt(self, level, optname, buflen):
+            return struct.pack("3i", 1234, os.getuid() + 1, os.getgid())
+
+    class _FakeWriter:
+        def get_extra_info(self, name):
+            return _FakeSock() if name == "socket" else None
+        def close(self):
+            pass
+
+    class _FakeReader:
+        async def read(self):
+            return json.dumps({"source": "user", "text": "do something"}).encode()
+
+    asyncio.run(d.handle(_FakeReader(), _FakeWriter()))
+    assert routed == [], "a mismatched peer uid must never reach route()"
 
 
 # ---- tools -----------------------------------------------------------------

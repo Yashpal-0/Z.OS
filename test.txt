@@ -1,0 +1,32 @@
+You have full access to local terminal execution, web search/scraping, and file system write permissions on this Ubuntu system. 
+
+Your objective is to conduct a end-to-end commercial feasibility study and fleet procurement proposal for transitioning a mid-sized regional delivery company (150 vehicles) from diesel light commercial vehicles (LCVs) to an Electric Vehicle (EV) fleet operating in two target hubs: Frankfurt (EU) and Hyderabad (South Asia).
+
+--- STAGE 1: LIVE MARKET RESEARCH & DATA GATHERING ---
+1. Perform web research to retrieve real-world data for commercial EV vans:
+   - Identify 3 leading commercial EV models currently available in Europe (e.g., Mercedes eSprinter, Ford E-Transit, Renault Master E-Tech) and 3 in South Asia (e.g., Tata Ace EV, Mahindra Zor Grand, Switch IEV).
+   - Gather current specs: acquisition cost, battery capacity (kWh), real-world range (km), payload capacity (kg), and charger compatibility (CCS2 / Type 2).
+   - Gather current regional electricity tariffs for commercial/industrial connections in Germany and India, along with current diesel fuel prices in Frankfurt and Hyderabad.
+
+--- STAGE 2: LOCAL FINANCIAL & TCO MODELING ---
+2. Using local bash tools, write and execute a Python script (`~/horizon_audit/scripts/tco_model.py`) to build a 5-Year Total Cost of Ownership (TCO) model comparing Diesel vs. Electric across both hubs:
+   - Parameters: 150 km daily drive per vehicle, 310 operational days/year, 5-year vehicle lifespan.
+   - Include: Capital Expenditure (CapEx), fuel/charging costs, estimated maintenance savings (~30% lower for EV), and government subsidy schemes active in both regions.
+   - Save the raw calculated outputs to `~/horizon_audit/data/tco_summary.json`.
+
+--- STAGE 3: LOCAL ARTIFACT GENERATION & FILE SYSTEM MANAGEMENT ---
+3. Organize the project files inside your Ubuntu home directory:
+   - Create directory structure: `~/horizon_audit/{data,scripts,reports,rfp}`.
+   - Generate a clean HTML or Markdown executive report (`~/horizon_audit/reports/Executive_Fleet_Proposal.md`) containing:
+     - Executive Summary & Strategy Overview.
+     - Side-by-side comparative markdown tables for vehicles, energy pricing, and TCO metrics.
+     - Risk Matrix (Grid constraints, residual battery value, downtime during charging).
+   - Convert the final report into a publication-ready PDF (`~/horizon_audit/reports/Executive_Fleet_Proposal.pdf`) using local tools (`pandoc`, `weasyprint`, or a custom Python script).
+
+--- STAGE 4: EXECUTIVE RFP & VENDOR CORRESPONDENCE ---
+4. Draft two tailored Request for Proposal (RFP) negotiation letters inside `~/horizon_audit/rfp/`:
+   - Letter 1: Addressed to commercial vehicle OEMs requesting bulk fleet pricing (150 units), charging infrastructure installation SLAs, and battery warranty terms.
+   - Letter 2: Addressed to regional energy providers requesting dedicated off-peak industrial charging tariffs and transformer upgrades.
+
+--- STAGE 5: FINAL TASK STATUS & BRIEFING ---
+5. Print a concise terminal briefing confirming completion, showing the full file tree of `~/horizon_audit/`, and listing key financial takeaways (e.g., payback period in months and total 5-year savings in EUR and INR).

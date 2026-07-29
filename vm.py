@@ -165,6 +165,10 @@ HANDLERS = {"vm_status": h_vm_status, "vm_see": h_vm_see, "vm_type": h_vm_type,
 SAFE = {"vm_status", "vm_see", "vm_type", "vm_key", "vm_click", "vm_shell",
         "vm_snapshot"}
 
+# ...and must prompt even in auto mode, since auto mode otherwise allows anything
+# not already denied — being outside SAFE only matters in guarded mode.
+ALWAYS_PROMPT = {"vm_restore"}
+
 
 def _fn(name, desc, props, required):
     return {"type": "function", "function": {
